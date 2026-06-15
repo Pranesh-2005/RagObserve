@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Projects</h1>
+<p class="muted">Every instrumented RAG application appears here.</p>
+<div id="projects" class="cards"><div class="empty">Loading…</div></div>
+{% endblock %}
+{% block scripts %}
+<script>
+(async () => {
+  const projects = await api("/api/projects");
+  const el = document.getElementById("projects");
+  if (!projects.length) {
+    el.innerHTML = `<div class="empty">No projects yet. Instrument your app with
+      <span class="mono">ragobserve.init(project=...)</span> and run a query.</div>`;
+    return;
+  }
+  el.innerHTML = projects.map(p => `
+    <div class="card clickable" onclick="location='/traces?project=${encodeURIComponent(p.name)}'">
+      <div class="big">${esc(p.name)}</div>
+      <div class="muted small" style="margin-top:8px">
+        ${p.traces} trace${p.traces === 1 ? "" : "s"}<br>
+        avg latency ${fmtMs(p.avg_latency_ms)}<br>
+        total cost ${fmtCost(p.total_cost)}<br>
+        last activity ${fmtTime(p.last_activity)}
+      </div>
+    </div>`).join("");
+})();
+</script>
+{% endblock %}

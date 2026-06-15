@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>RAGObserve</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <nav class="topnav">
+    <a class="brand" href="/"><span class="logo">◈</span> RAGObserve</a>
+    <div class="navlinks">
+      <a href="/" class="{% if page == 'dashboard' %}active{% endif %}">Projects</a>
+      <a href="/traces" class="navlink-project {% if page == 'traces' %}active{% endif %}">Traces</a>
+      <a href="/generations" class="navlink-project {% if page == 'generations' %}active{% endif %}">Generations</a>
+      <a href="/chunks" class="navlink-project {% if page == 'chunks' %}active{% endif %}">Chunks</a>
+      <a href="/metrics" class="navlink-project {% if page == 'metrics' %}active{% endif %}">Metrics</a>
+    </div>
+    <span class="nav-spacer"></span>
+    <span class="muted small">local-first RAG observability</span>
+  </nav>
+  <main class="container">
+    {% block content %}{% endblock %}
+  </main>
+  <script src="/static/app.js"></script>
+  <script src="/static/charts.js"></script>
+  {% block scripts %}{% endblock %}
+</body>
+</html>

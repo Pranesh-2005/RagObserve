@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ragobserve"
+version = "0.2.0"
+description = "RAGObserve: local-first observability, debugging and evaluation for RAG systems. The MLflow for RAG."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Pranesh", email = "praneshmadhan646@gmail.com" }]
+keywords = ["rag", "observability", "tracing", "retrieval", "llm", "evaluation"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Topic :: Software Development :: Debuggers",
+]
+dependencies = [
+    "fastapi>=0.100",
+    "uvicorn>=0.23",
+    "jinja2>=3.1",
+    "pydantic>=2.0",
+    "httpx>=0.24",
+]
+
+[project.optional-dependencies]
+langchain = ["langchain-core>=0.1"]
+llamaindex = ["llama-index-core>=0.10"]
+# Live generation replay works out of the box via httpx (OpenAI-compatible
+# providers + Anthropic + Ollama), so no extra deps are strictly required.
+# Install these only if you prefer the official vendor SDKs elsewhere.
+llm = ["anthropic>=0.40", "openai>=1.0"]
+dev = ["pytest>=7.0"]
+
+[project.scripts]
+ragobserve = "ragobserve.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/Pranesh-2005/ragobserve"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.setuptools.packages.find]
+include = ["ragobserve*"]
+
+[tool.setuptools.package-data]
+"ragobserve.server" = ["templates/*.html", "static/*.css", "static/*.js"]

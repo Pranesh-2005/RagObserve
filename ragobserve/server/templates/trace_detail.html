@@ -1,0 +1,227 @@
+{% extends "base.html" %}
+{% block content %}
+<h1 id="title">Trace</h1>
+<div id="summary" class="cards"></div>
+<h2>Pipeline waterfall</h2>
+<div id="waterfall" class="waterfall"><div class="empty">Loading…</div></div>
+<div id="detail" class="detail-panel" style="display:none"></div>
+{% endblock %}
+{% block scripts %}
+<script>
+const TRACE_ID = {{ trace_id | tojson }};
+let DATA = null;
+
+function resultsTable(results, extraCols) {
+  if (!results || !results.length) return `<p class="muted">none</p>`;
+  return `<table class="data"><thead><tr>
+      <th>#</th><th>Score</th><th>Source</th><th>Text</th>${extraCols ? extraCols.header : ""}
+    </tr></thead><tbody>
+    ${results.map((r, i) => `<tr>
+      <td>${r.rank ?? i + 1}</td>
+      <td class="mono">${fmtNum(r.score)}</td>
+      <td class="mono">${esc(r.source || (r.metadata && r.metadata.source) || "—")}</td>
+      <td>${esc(truncate(r.text, 180))}</td>
+      ${extraCols ? extraCols.cell(r, i) : ""}
+    </tr>`).join("")}</tbody></table>`;
+}
+
+function keyOf(r) { return r.id || (r.text || "").slice(0, 60); }
+
+function renderRetrieval(a) {
+  return `<h2>Retrieval Explorer</h2>
+    <dl class="kv">
+      <dt>Query</dt><dd>${esc(a.query || "—")}</dd>
+      <dt>Retriever</dt><dd>${esc(a.retriever || "—")}</dd>
+      <dt>top_k</dt><dd>${esc(a.top_k ?? "—")}</dd>
+    </dl>
+    ${resultsTable(a.results)}`;
+}
+
+function renderFusion(a) {
+  const inputs = a.inputs || {};
+  const names = Object.keys(inputs);
+  let html = `<h2>Hybrid Search Explorer</h2>
+    <p class="muted small">strategy: <span class="mono">${esc(a.strategy || "—")}</span></p>`;
+  if (names.length) {
+    html += `<div class="cols${names.length > 1 ? "" : ""}" style="grid-template-columns:repeat(${names.length},1fr)">` +
+      names.map(n => `<div><h2>${esc(n)}</h2>${resultsTable(inputs[n])}</div>`).join("") + `</div>`;
+  }
+  html += `<h2>Fused results</h2>${resultsTable(a.results)}`;
+  return html;
+}
+
+function renderRerank(a) {
+  const before = a.before || [], after = a.after || [];
+  const beforePos = {};
+  before.forEach((r, i) => beforePos[keyOf(r)] = i + 1);
+  const extra = {
+    header: "<th>Rank shift</th>",
+    cell: (r, i) => {
+      const prev = beforePos[keyOf(r)];
+      if (prev === undefined) return `<td class="muted">new</td>`;
+      const d = prev - (i + 1);
+      if (d === 0) return `<td class="muted">·</td>`;
+      return d > 0 ? `<td class="shift-up">▲ +${d}</td>` : `<td class="shift-down">▼ ${d}</td>`;
+    }
+  };
+  return `<h2>Reranker Analytics</h2>
+    <p class="muted small">model: <span class="mono">${esc(a.model || "—")}</span></p>
+    <div class="cols">
+      <div><h2>Before</h2>${resultsTable(before)}</div>
+      <div><h2>After</h2>${resultsTable(after, extra)}</div>
+    </div>`;
+}
+
+function renderContext(a) {
+  const used = a.token_count || 0, win = a.context_window || 0;
+  const pct = win ? Math.min(100, used / win * 100) : 0;
+  return `<h2>Context Builder Viewer</h2>
+    <dl class="kv">
+      <dt>Query</dt><dd>${esc(a.query || "—")}</dd>
+      <dt>Tokens (est.)</dt><dd>${used}${win ? ` / ${win}` : ""}</dd>
+    </dl>
+    ${win ? `<div class="token-bar"><div style="width:${pct}%"></div></div>` : ""}
+    ${a.system_prompt ? `<h2>System prompt</h2><pre class="block">${esc(a.system_prompt)}</pre>` : ""}
+    ${(a.chunks && a.chunks.length) ? `<h2>Injected chunks (${a.chunks.length})</h2>${resultsTable(a.chunks)}` : ""}
+    <h2>Final prompt (exactly what the model saw)</h2>
+    <pre class="block">${esc(a.final_prompt || "—")}</pre>
+    ${replayPanelHtml()}`;
+}
+
+function renderGeneration(a) {
+  return `<h2>Generation</h2>
+    <dl class="kv">
+      <dt>Model</dt><dd>${esc(a.model || "—")}${a.provider ? ` <span class="badge provider">${esc(a.provider)}</span>` : ""}${a.replayed ? ` <span class="badge replay">replay</span>` : ""}</dd>
+      <dt>Tokens</dt><dd>${a.input_tokens ?? "—"} in / ${a.output_tokens ?? "—"} out</dd>
+      <dt>Cost</dt><dd>${fmtCost(a.cost)}${a.cost_estimated ? ` <span class="muted small">(est.)</span>` : ""}</dd>
+    </dl>
+    ${a.prompt ? `<h2>Context / prompt used</h2><pre class="block">${esc(a.prompt)}</pre>` : ""}
+    <h2>Response</h2><pre class="block">${esc(a.response || "—")}</pre>
+    ${replayPanelHtml()}`;
+}
+
+/* ---- live replay generation -------------------------------------------- */
+let PROVIDERS = null;
+
+function replayPanelHtml() {
+  return `<div class="replay-panel" id="replayPanel">
+    <div class="muted small" style="margin-bottom:8px">↻ Replay generation — re-run an LLM over this trace's captured context</div>
+    <div class="replay-controls">
+      <select id="rpProvider"></select>
+      <input type="text" id="rpModel" placeholder="model (blank = default)" size="26">
+      <button class="btn" id="rpRun" onclick="runReplay()">Generate</button>
+      <span id="rpStatus" class="muted small"></span>
+    </div>
+    <div id="rpResult"></div>
+  </div>`;
+}
+
+async function initReplay() {
+  const sel = document.getElementById("rpProvider");
+  if (!sel) return;
+  if (!PROVIDERS) PROVIDERS = await api("/api/providers");
+  sel.innerHTML = PROVIDERS.map(p =>
+    `<option value="${esc(p.id)}" data-model="${esc(p.default_model)}" ${p.ready ? "" : "data-notready=1"}>
+      ${esc(p.label)}${p.ready ? "" : " — " + esc(p.hint)}</option>`).join("");
+  const sync = () => {
+    const o = sel.selectedOptions[0];
+    document.getElementById("rpModel").placeholder = `default: ${o.dataset.model}`;
+    document.getElementById("rpStatus").textContent = o.dataset.notready ? "not configured" : "";
+  };
+  sel.addEventListener("change", sync); sync();
+}
+
+async function runReplay() {
+  const provider = document.getElementById("rpProvider").value;
+  const model = document.getElementById("rpModel").value.trim();
+  const btn = document.getElementById("rpRun");
+  const status = document.getElementById("rpStatus");
+  const result = document.getElementById("rpResult");
+  btn.disabled = true;
+  status.innerHTML = `<span class="spin"></span> generating…`;
+  result.innerHTML = "";
+  try {
+    const r = await fetch("/api/generate", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ provider, model: model || null, trace_id: TRACE_ID, max_tokens: 1024 }),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.detail || `HTTP ${r.status}`);
+    status.textContent = "";
+    result.innerHTML = `<dl class="kv" style="margin-top:12px">
+        <dt>Model</dt><dd>${esc(data.model)} <span class="badge provider">${esc(data.provider)}</span></dd>
+        <dt>Tokens</dt><dd>${data.input_tokens ?? "—"} in / ${data.output_tokens ?? "—"} out</dd>
+        <dt>Cost</dt><dd>${fmtCost(data.cost)}</dd>
+        <dt>Latency</dt><dd>${fmtMs(data.duration_ms)}</dd>
+      </dl>
+      <h2>New response</h2><pre class="block">${esc(data.response || "—")}</pre>
+      <p class="muted small">Logged to this trace — <a href="javascript:location.reload()">reload</a> to see it in the waterfall.</p>`;
+  } catch (e) {
+    status.innerHTML = `<span class="shift-down">✕ ${esc(e.message)}</span>`;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function renderGeneric(ev) {
+  return `<h2>${esc(ev.name || ev.stage)}</h2>
+    <pre class="block">${esc(JSON.stringify(ev.attributes, null, 2))}</pre>`;
+}
+
+function showEvent(ev, row) {
+  document.querySelectorAll(".span-row").forEach(r => r.classList.remove("selected"));
+  if (row) row.classList.add("selected");
+  const a = ev.attributes || {};
+  const panel = document.getElementById("detail");
+  const renderers = {
+    retrieval: renderRetrieval, fusion: renderFusion, reranking: renderRerank,
+    context_assembly: renderContext, generation: renderGeneration,
+  };
+  panel.innerHTML = (renderers[ev.stage] || (() => renderGeneric(ev)))(a) || renderGeneric(ev);
+  panel.style.display = "block";
+  initReplay();
+}
+
+(async () => {
+  DATA = await api(`/api/traces/${encodeURIComponent(TRACE_ID)}`);
+  const t = DATA.trace, evs = DATA.events, d = DATA.derived || {};
+  document.getElementById("title").textContent = truncate(t.query || t.name || t.trace_id, 110);
+
+  const genCost = evs.filter(e => e.stage === "generation")
+    .reduce((s, e) => s + (Number(e.attributes && e.attributes.cost) || 0), 0);
+  document.getElementById("summary").innerHTML = [
+    ["Status", `${statusBadge(t.status)}`],
+    ["Latency", fmtMs(t.duration_ms)],
+    ["Cost", fmtCost(genCost)],
+    ["Spans", evs.length],
+    ["Chunk utilization", fmtPct(d.chunk_utilization)],
+    ["Reranker τ", fmtNum(d.reranker_kendall_tau, 2)],
+  ].map(([k, v]) => `<div class="card"><div class="muted small">${k}</div><div class="big">${v}</div></div>`).join("");
+
+  const t0 = Math.min(...evs.map(e => e.start_time || 0));
+  const t1 = Math.max(...evs.map(e => e.end_time || e.start_time || 0));
+  const span = Math.max(t1 - t0, 1e-6);
+  const wf = document.getElementById("waterfall");
+  wf.innerHTML = "";
+  evs.forEach(ev => {
+    const left = ((ev.start_time - t0) / span) * 100;
+    const width = (((ev.end_time || ev.start_time) - ev.start_time) / span) * 100;
+    const row = document.createElement("div");
+    row.className = "span-row";
+    row.innerHTML = `
+      <div>${stageBadge(ev.stage)} <span class="small">${esc(truncate(ev.name, 22))}</span></div>
+      <div class="span-bar-track"><div class="span-bar ${ev.status === "error" ? "error" : ""}"
+           style="left:${left}%;width:${Math.max(width, 0.5)}%"></div></div>
+      <div class="mono muted">${fmtMs(ev.duration_ms)}</div>`;
+    row.addEventListener("click", () => showEvent(ev, row));
+    wf.appendChild(row);
+  });
+  // auto-open the most interesting span
+  const interesting = ["context_assembly", "reranking", "retrieval", "generation"];
+  for (const s of interesting) {
+    const i = evs.findIndex(e => e.stage === s);
+    if (i >= 0) { showEvent(evs[i], wf.children[i]); break; }
+  }
+})();
+</script>
+{% endblock %}

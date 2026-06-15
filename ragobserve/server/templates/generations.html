@@ -1,0 +1,126 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Generations &amp; Cost</h1>
+<p class="muted">LLM cost tracing — token usage, spend over time, and the context behind every generation.</p>
+<div class="toolbar">
+  <label class="muted small">Project</label>
+  <select id="project"></select>
+</div>
+
+<div id="summary" class="cards"></div>
+
+<div class="chart-grid">
+  <div class="panel">
+    <h3>Cost over time</h3>
+    <div class="sub">daily LLM spend (USD)</div>
+    <div id="costSeries"></div>
+  </div>
+  <div class="panel">
+    <h3>Token split</h3>
+    <div class="sub">input vs output</div>
+    <div id="tokenDonut" class="donut-wrap"></div>
+  </div>
+</div>
+
+<div class="chart-grid">
+  <div class="panel">
+    <h3>Cost by model</h3>
+    <div class="sub">total spend per model</div>
+    <div id="costByModel"></div>
+  </div>
+  <div class="panel">
+    <h3>Calls over time</h3>
+    <div class="sub">generations per day</div>
+    <div id="callSeries"></div>
+  </div>
+</div>
+
+<h2>Per-model breakdown</h2>
+<div id="modelTable"></div>
+
+<h2>Recent generations</h2>
+<p class="muted small">The exact prompt/context and the response, with cost. Click a row to expand.</p>
+<div id="gens"></div>
+{% endblock %}
+{% block scripts %}
+<script>
+function usd(v) { v = Number(v || 0); return v >= 1 ? `$${v.toFixed(2)}` : `$${v.toFixed(4)}`; }
+function compact(n) {
+  n = Number(n || 0);
+  if (n >= 1e6) return (n / 1e6).toFixed(2) + "M";
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + "k";
+  return String(Math.round(n));
+}
+
+async function load(project) {
+  const summaryEl = document.getElementById("summary");
+  if (!project) { summaryEl.innerHTML = `<div class="empty">No project selected.</div>`; return; }
+
+  const c = await api(`/api/costs?project=${encodeURIComponent(project)}`);
+  const t = c.totals;
+  summaryEl.innerHTML = [
+    ["Total cost", usd(t.cost)],
+    ["Generations", t.generations],
+    ["Total tokens", compact(t.total_tokens)],
+    ["Input / Output", `${compact(t.input_tokens)} / ${compact(t.output_tokens)}`],
+    ["Models used", t.models],
+  ].map(([k, v]) => `<div class="card accent"><div class="label">${k}</div><div class="big">${v}</div></div>`).join("");
+
+  // charts
+  document.getElementById("costSeries").innerHTML =
+    lineChart(c.by_day.map(d => ({ x: d.day.slice(5), y: d.cost })),
+      { color: "green", fmt: usd, label: "cost over time" });
+  document.getElementById("callSeries").innerHTML =
+    lineChart(c.by_day.map(d => ({ x: d.day.slice(5), y: d.calls })),
+      { color: "accent", fmt: compact, label: "calls over time" });
+  document.getElementById("costByModel").innerHTML =
+    barChart(c.by_model.map(m => ({ label: m.model, value: m.cost })), { fmt: usd, label: "cost by model" });
+
+  const tok = [{ label: "input", value: t.input_tokens }, { label: "output", value: t.output_tokens }];
+  document.getElementById("tokenDonut").innerHTML = donutChart(tok, { fmt: compact }) + legend(tok, compact);
+
+  // per-model table
+  const mt = document.getElementById("modelTable");
+  mt.innerHTML = c.by_model.length ? `<table class="data"><thead><tr>
+      <th>Model</th><th>Calls</th><th>Cost</th><th>Input tok</th><th>Output tok</th><th>Avg latency</th>
+    </tr></thead><tbody>${c.by_model.map(m => `<tr>
+      <td class="mono">${esc(m.model)}</td><td>${m.calls}</td><td>${usd(m.cost)}</td>
+      <td>${compact(m.input_tokens)}</td><td>${compact(m.output_tokens)}</td>
+      <td>${fmtMs(m.avg_latency_ms)}</td></tr>`).join("")}</tbody></table>`
+    : `<div class="empty">No generations logged yet. Use <span class="mono">ragobserve.log_generation(...)</span> or replay one from a trace.</div>`;
+
+  // recent generations
+  const gens = await api(`/api/generations?project=${encodeURIComponent(project)}&limit=100`);
+  const g = document.getElementById("gens");
+  if (!gens.length) { g.innerHTML = `<div class="empty">No generations yet.</div>`; return; }
+  g.innerHTML = `<table class="data"><thead><tr>
+      <th>Query / Prompt</th><th>Model</th><th>Provider</th><th>Tokens</th><th>Cost</th><th>Latency</th><th></th>
+    </tr></thead><tbody>${gens.map((x, i) => `
+      <tr class="rowlink gen-row" onclick="toggle(${i})">
+        <td>${esc(truncate(x.query || x.prompt || x.name, 80))}
+          ${x.replayed ? `<span class="badge replay">replay</span>` : ""}</td>
+        <td class="mono">${esc(x.model || "—")}</td>
+        <td>${x.provider ? `<span class="badge provider">${esc(x.provider)}</span>` : "—"}</td>
+        <td><span class="tok-pill">${compact(x.input_tokens)}→${compact(x.output_tokens)}</span></td>
+        <td>${usd(x.cost)}</td>
+        <td>${fmtMs(x.duration_ms)}</td>
+        <td><a href="/traces/${esc(x.trace_id)}?project=${encodeURIComponent(project)}" onclick="event.stopPropagation()">trace ↗</a></td>
+      </tr>
+      <tr id="exp-${i}" style="display:none"><td colspan="7">
+        ${x.prompt ? `<div class="muted small">Context / prompt used</div><div class="context-box"><pre class="block" style="border:none;background:none;padding:0;max-height:220px">${esc(x.prompt)}</pre></div>` : ""}
+        <div class="muted small" style="margin-top:10px">Response</div>
+        <pre class="block">${esc(x.response || "—")}</pre>
+      </td></tr>`).join("")}</tbody></table>`;
+}
+
+function toggle(i) {
+  const r = document.getElementById(`exp-${i}`);
+  r.style.display = r.style.display === "none" ? "table-row" : "none";
+}
+
+(async () => {
+  const current = await projectSelector("project", load);
+  await load(current);
+})();
+</script>
+{% endblock %}

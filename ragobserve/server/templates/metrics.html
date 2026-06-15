@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Evaluation Metrics</h1>
+<p class="muted">Computed over traces with ground truth (<span class="mono">ragobserve.log_ground_truth(...)</span>).</p>
+<div class="toolbar">
+  <label class="muted small">Project</label>
+  <select id="project"></select>
+  <label class="muted small">k</label>
+  <input type="text" id="k" value="10" size="3">
+</div>
+<div id="aggregate" class="cards"></div>
+<div id="pertrace"></div>
+{% endblock %}
+{% block scripts %}
+<script>
+async function load(project) {
+  const agg = document.getElementById("aggregate");
+  const per = document.getElementById("pertrace");
+  if (!project) { agg.innerHTML = ""; per.innerHTML = `<div class="empty">No project selected.</div>`; return; }
+  const k = parseInt(document.getElementById("k").value) || 10;
+  const m = await api(`/api/metrics?project=${encodeURIComponent(project)}&k=${k}`);
+  const a = m.aggregate;
+  if (!a.traces_evaluated) {
+    agg.innerHTML = "";
+    per.innerHTML = `<div class="empty">No ground truth logged yet for this project.</div>`;
+    return;
+  }
+  agg.innerHTML = [
+    ["Traces evaluated", a.traces_evaluated],
+    [`Precision@${a.k}`, fmtPct(a.precision_at_k)],
+    [`Recall@${a.k}`, fmtPct(a.recall_at_k)],
+    ["MRR", fmtNum(a.mrr)],
+    [`nDCG@${a.k}`, fmtNum(a.ndcg)],
+  ].map(([kk, v]) => `<div class="card"><div class="muted small">${kk}</div><div class="big">${v}</div></div>`).join("");
+  per.innerHTML = `<table class="data"><thead><tr>
+      <th>Trace</th><th>Precision@${a.k}</th><th>Recall@${a.k}</th><th>MRR</th><th>nDCG@${a.k}</th>
+    </tr></thead><tbody>
+    ${m.per_trace.map(t => `<tr class="rowlink" onclick="location='/traces/${esc(t.trace_id)}?project=${encodeURIComponent(project)}'">
+      <td class="mono small">${esc(t.trace_id.slice(0, 12))}…</td>
+      <td>${fmtPct(t.precision_at_k)}</td><td>${fmtPct(t.recall_at_k)}</td>
+      <td>${fmtNum(t.mrr)}</td><td>${fmtNum(t.ndcg)}</td>
+    </tr>`).join("")}</tbody></table>`;
+}
+(async () => {
+  const current = await projectSelector("project", load);
+  document.getElementById("k").addEventListener("change", () => load(document.getElementById("project").value));
+  await load(current);
+})();
+</script>
+{% endblock %}

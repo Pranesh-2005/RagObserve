@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Query Explorer</h1>
+<div class="toolbar">
+  <label class="muted small">Project</label>
+  <select id="project"></select>
+</div>
+<div id="traces"><div class="empty">Loading…</div></div>
+{% endblock %}
+{% block scripts %}
+<script>
+async function load(project) {
+  const el = document.getElementById("traces");
+  if (!project) { el.innerHTML = `<div class="empty">No project selected.</div>`; return; }
+  const traces = await api(`/api/traces?project=${encodeURIComponent(project)}`);
+  if (!traces.length) { el.innerHTML = `<div class="empty">No traces yet for this project.</div>`; return; }
+  el.innerHTML = `
+    <table class="data">
+      <thead><tr>
+        <th>Query</th><th>Status</th><th>Latency</th><th>Cost</th>
+        <th>Retriever</th><th>Model</th><th>Chunks</th><th>Time</th>
+      </tr></thead>
+      <tbody>${traces.map(t => `
+        <tr class="rowlink" onclick="location='/traces/${esc(t.trace_id)}?project=${encodeURIComponent(project)}'">
+          <td>${esc(truncate(t.query || t.name || t.trace_id, 90))}</td>
+          <td>${statusBadge(t.status)}</td>
+          <td>${fmtMs(t.duration_ms)}</td>
+          <td>${fmtCost(t.cost)}</td>
+          <td class="mono">${esc(t.retriever || "—")}</td>
+          <td class="mono">${esc(t.model || "—")}</td>
+          <td>${t.chunk_count ?? 0}</td>
+          <td class="muted small">${fmtTime(t.start_time)}</td>
+        </tr>`).join("")}
+      </tbody>
+    </table>`;
+}
+(async () => {
+  const current = await projectSelector("project", load);
+  await load(current);
+})();
+</script>
+{% endblock %}

@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Chunk Explorer</h1>
+<div class="toolbar">
+  <label class="muted small">Project</label>
+  <select id="project"></select>
+</div>
+<div class="tabs">
+  <button data-view="top" class="active">Most retrieved</button>
+  <button data-view="unused">Never retrieved</button>
+  <button data-view="duplicates">Duplicates</button>
+</div>
+<div id="chunks"><div class="empty">Loading…</div></div>
+{% endblock %}
+{% block scripts %}
+<script>
+let VIEW = "top";
+
+async function load(project) {
+  const el = document.getElementById("chunks");
+  if (!project) { el.innerHTML = `<div class="empty">No project selected.</div>`; return; }
+  const rows = await api(`/api/chunks?project=${encodeURIComponent(project)}&view=${VIEW}`);
+  if (!rows.length) { el.innerHTML = `<div class="empty">Nothing here.</div>`; return; }
+  el.innerHTML = `<table class="data"><thead><tr>
+      <th>Chunk</th><th>Source</th><th>Tokens</th>
+      <th>${VIEW === "duplicates" ? "Copies" : "Retrievals"}</th>
+      ${VIEW === "top" ? "<th>Avg score</th>" : ""}
+    </tr></thead><tbody>
+    ${rows.map(c => `<tr>
+      <td>${esc(truncate(c.text, 200))}<div class="muted small mono">${esc(c.content_hash.slice(0, 12))}</div></td>
+      <td class="mono small">${esc(c.source || "—")}</td>
+      <td>${c.token_count ?? "—"}</td>
+      <td>${VIEW === "duplicates" ? c.copies : c.retrievals}</td>
+      ${VIEW === "top" ? `<td class="mono">${fmtNum(c.avg_score)}</td>` : ""}
+    </tr>`).join("")}</tbody></table>`;
+}
+
+(async () => {
+  const current = await projectSelector("project", load);
+  document.querySelectorAll(".tabs button").forEach(b => b.addEventListener("click", () => {
+    document.querySelectorAll(".tabs button").forEach(x => x.classList.remove("active"));
+    b.classList.add("active");
+    VIEW = b.dataset.view;
+    load(document.getElementById("project").value);
+  }));
+  await load(current);
+})();
+</script>
+{% endblock %}
