@@ -37,6 +37,7 @@ async function load(project) {
 (async () => {
   const current = await projectSelector("project", load);
   await load(current);
+  if (current) connectLiveFeed(current, () => load(current));
 })();
 </script>
 {% endblock %}

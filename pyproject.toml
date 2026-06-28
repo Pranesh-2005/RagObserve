@@ -4,11 +4,11 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ragobserve"
-version = "0.2.0"
+version = "0.4.0"
 description = "RAGObserve: local-first observability, debugging and evaluation for RAG systems. The MLflow for RAG."
 readme = "README.md"
 requires-python = ">=3.9"
-license = { text = "Apache-2.0" }
+license = "Apache-2.0"
 authors = [{ name = "Pranesh", email = "praneshmadhan646@gmail.com" }]
 keywords = ["rag", "observability", "tracing", "retrieval", "llm", "evaluation"]
 classifiers = [
@@ -23,6 +23,7 @@ dependencies = [
     "jinja2>=3.1",
     "pydantic>=2.0",
     "httpx>=0.24",
+    "slowapi>=0.1.9",
 ]
 
 [project.optional-dependencies]
@@ -32,7 +33,11 @@ llamaindex = ["llama-index-core>=0.10"]
 # providers + Anthropic + Ollama), so no extra deps are strictly required.
 # Install these only if you prefer the official vendor SDKs elsewhere.
 llm = ["anthropic>=0.40", "openai>=1.0"]
-dev = ["pytest>=7.0"]
+# Store backends
+postgres = ["psycopg2-binary>=2.9"]
+files    = ["fsspec>=2023.1"]          # add s3fs / gcsfs / adlfs / gdrivefs for cloud targets
+tiktoken = ["tiktoken>=0.5"]
+dev = ["pytest>=7.0", "moto[s3]>=5.0", "s3fs>=2023.1", "psycopg2-binary>=2.9", "tiktoken>=0.5"]
 
 [project.scripts]
 ragobserve = "ragobserve.cli:main"

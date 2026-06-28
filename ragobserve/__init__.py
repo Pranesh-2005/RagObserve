@@ -28,7 +28,9 @@ from .adapters.vectordb import (
     instrument_weaviate,
     log_pgvector,
 )
-from .client import flush, get_client, init
+from .client import flush, get_client, init, serve
+from .eval import evaluate_trace, score_answer_relevance, score_faithfulness
+from .stores import BaseStore, FileStore, MultiStore, PostgresStore, S3Store, SQLiteStore
 from .events import Chunk, RagEvent, Stage
 from .tracing import (
     current_trace_id,
@@ -44,10 +46,12 @@ from .tracing import (
     trace,
 )
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 __all__ = [
-    "init", "flush", "get_client", "trace", "current_trace_id",
+    "init", "flush", "get_client", "serve", "trace", "current_trace_id",
+    "score_faithfulness", "score_answer_relevance", "evaluate_trace",
+    "BaseStore", "SQLiteStore", "PostgresStore", "FileStore", "S3Store", "MultiStore",
     "log_ingestion", "log_chunks", "log_embedding", "log_retrieval", "log_fusion",
     "log_rerank", "log_context", "log_generation", "log_ground_truth",
     "instrument_chroma", "instrument_pinecone", "instrument_qdrant",

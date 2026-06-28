@@ -10,16 +10,30 @@ from typing import Any, Dict, List, Optional
 
 
 class LocalClient:
-    """Writes events straight to ./ragobserve.db (or a given path)."""
+    """Writes events straight to ./ragobserve.db (or a given path).
 
-    def __init__(self, db_path: Optional[str] = None):
-        from .server.db import Store
-        from .storage import resolve
+    In a running asyncio loop log_event offloads the SQLite write to the
+    default thread-pool executor so it never blocks the event loop. In
+    synchronous code (tests, scripts) it writes inline."""
 
-        self.store = Store(resolve(db_path))
+    def __init__(self, db_path: Optional[str] = None, store: Optional[object] = None):
+        if store is not None:
+            self.store = store
+        else:
+            from .server.db import Store
+            from .storage import resolve
+
+            self.store = Store(resolve(db_path))
 
     def log_event(self, event: Dict[str, Any]) -> None:
-        self.store.ingest_events([event])
+        import asyncio
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self.store.ingest_events([event])
+            return
+        loop.run_in_executor(None, self.store.ingest_events, [event])
 
     def log_ground_truth(self, trace_id: str, project: str, relevant_chunk_ids: List[str]) -> None:
         self.store.set_ground_truth(trace_id, project, relevant_chunk_ids)
@@ -31,11 +45,13 @@ class LocalClient:
 class HttpClient:
     """Buffers events and POSTs them to the tracking server in batches."""
 
-    def __init__(self, tracking_uri: str, flush_interval: float = 1.0, batch_size: int = 100):
+    def __init__(self, tracking_uri: str, api_key: str = "",
+                 flush_interval: float = 1.0, batch_size: int = 100):
         import httpx
 
         self.base = tracking_uri.rstrip("/")
-        self._http = httpx.Client(timeout=10.0)
+        headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+        self._http = httpx.Client(timeout=10.0, headers=headers)
         self._queue: "queue.Queue[Dict[str, Any]]" = queue.Queue()
         self._batch_size = batch_size
         self._interval = flush_interval
@@ -91,15 +107,28 @@ class _Config:
 _config = _Config()
 
 
-def init(project: str = "default", tracking_uri: Optional[str] = None, db_path: Optional[str] = None):
-    """Initialize RAGObserve. With no ``tracking_uri`` events are written
-    directly to a local SQLite file, MLflow-style. With no ``db_path`` the
-    store defaults to a hidden ``./.ragobserve/ragobserve.db``."""
+def init(
+    project: str = "default",
+    tracking_uri: Optional[str] = None,
+    db_path: Optional[str] = None,
+    store: Optional[object] = None,
+    api_key: str = "",
+):
+    """Initialize RAGObserve.
+
+    Priority: ``tracking_uri`` > ``store`` > ``db_path`` > local default.
+
+    * ``tracking_uri`` — send events to a remote RAGObserve server over HTTP.
+    * ``api_key``      — Bearer token for the remote server (required when auth is enabled).
+    * ``store``        — use any ``BaseStore``-compatible backend directly
+                         (PostgresStore, FileStore, MultiStore, or custom).
+    * ``db_path``      — local SQLite file path (default: hidden .ragobserve/ragobserve.db).
+    """
     _config.project = project
     if tracking_uri:
-        _config.client = HttpClient(tracking_uri)
+        _config.client = HttpClient(tracking_uri, api_key=api_key)
     else:
-        _config.client = LocalClient(db_path)
+        _config.client = LocalClient(db_path=db_path, store=store)
     return _config.client
 
 
@@ -116,3 +145,23 @@ def get_project() -> str:
 def flush() -> None:
     if _config.client is not None:
         _config.client.flush()
+
+
+def serve(host: str = "127.0.0.1", port: int = 5601, db_path: Optional[str] = None,
+          api_key: Optional[str] = None) -> None:
+    """Start the RAGObserve dashboard. Equivalent to ``ragobserve ui``."""
+    import os
+    import uvicorn
+
+    from .server.app import create_app
+    from .server.auth import get_api_key
+
+    if api_key:
+        os.environ["RAGOBSERVE_API_KEY"] = api_key
+
+    key = get_api_key()
+    app = create_app(db_path)
+    print(f"RAGObserve UI  → http://{host}:{port}/?key={key}")
+    print(f"API key        → {key}")
+    print("Set RAGOBSERVE_API_KEY env var to use a fixed key.")
+    uvicorn.run(app, host=host, port=port, log_level="warning")

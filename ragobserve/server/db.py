@@ -15,6 +15,40 @@ from typing import Any, Dict, List, Optional
 from ..events import content_hash, estimate_tokens
 from . import pricing
 
+MIGRATIONS = [
+    (1, """
+CREATE TABLE IF NOT EXISTS eval_scores (
+    trace_id     TEXT NOT NULL,
+    project      TEXT NOT NULL,
+    metric       TEXT NOT NULL,
+    score        REAL,
+    reason       TEXT,
+    model        TEXT,
+    evaluated_at REAL,
+    PRIMARY KEY (trace_id, metric)
+);
+"""),
+]
+
+
+def _apply_migrations(conn: sqlite3.Connection, lock: threading.Lock) -> None:
+    with lock:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS schema_versions "
+            "(version INTEGER PRIMARY KEY, applied_at REAL)"
+        )
+        row = conn.execute("SELECT MAX(version) AS v FROM schema_versions").fetchone()
+        current = row["v"] or 0
+        for version, sql in MIGRATIONS:
+            if version > current:
+                conn.executescript(sql.strip())
+                conn.execute(
+                    "INSERT OR IGNORE INTO schema_versions(version, applied_at) VALUES (?,?)",
+                    (version, time.time()),
+                )
+        conn.commit()
+
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS projects (
     name TEXT PRIMARY KEY,
@@ -91,6 +125,7 @@ class Store:
         with self._lock:
             self._conn.executescript(SCHEMA)
             self._conn.commit()
+        _apply_migrations(self._conn, self._lock)
 
     def close(self) -> None:
         with self._lock:
@@ -104,6 +139,12 @@ class Store:
             for ev in events:
                 self._ingest_one(cur, ev)
             self._conn.commit()
+        try:
+            from . import bus
+            for ev in events:
+                bus.publish(ev)
+        except Exception:
+            pass
         return len(events)
 
     def _ingest_one(self, cur: sqlite3.Cursor, ev: Dict[str, Any]) -> None:
@@ -464,6 +505,29 @@ class Store:
                 ctx["final_prompt"] = ctx["final_prompt"] or a.get("prompt")
                 ctx["model"] = a.get("model") or ctx["model"]
         return ctx
+
+    # ----------------------------------------------------- eval scores
+
+    def set_eval_score(
+        self, trace_id: str, project: str, metric: str,
+        score: Optional[float], reason: str = "", model: str = "",
+    ) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO eval_scores"
+                "(trace_id, project, metric, score, reason, model, evaluated_at)"
+                " VALUES (?,?,?,?,?,?,?)",
+                (trace_id, project, metric, score, reason, model, time.time()),
+            )
+            self._conn.commit()
+
+    def get_eval_scores(self, trace_id: str) -> List[Dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT metric, score, reason, model, evaluated_at FROM eval_scores WHERE trace_id=?",
+                (trace_id,),
+            ).fetchall()
+        return [dict(r) for r in rows]
 
     def traces_with_ground_truth(self, project: str) -> List[Dict[str, Any]]:
         """Per-trace (final ranked chunk ids, relevant ids) pairs for the eval metrics."""

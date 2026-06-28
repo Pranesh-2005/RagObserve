@@ -3,12 +3,14 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 
 from ..events import RagEvent, Stage, content_hash
 from . import metrics as M
 from . import pricing
+from .auth import require_api_key
+from .ratelimit import limiter
 
 
 class EventBatch(BaseModel):
@@ -33,12 +35,13 @@ class GenerateRequest(BaseModel):
 
 
 def build_router() -> APIRouter:
-    router = APIRouter(prefix="/api")
+    router = APIRouter(prefix="/api", dependencies=[Depends(require_api_key)])
 
     def store(request: Request):
         return request.app.state.store
 
     @router.post("/events")
+    @limiter.limit("500/minute")
     def ingest(batch: EventBatch, request: Request):
         n = store(request).ingest_events(batch.events)
         return {"ingested": n}
@@ -107,6 +110,7 @@ def build_router() -> APIRouter:
         return llm.available_providers()
 
     @router.post("/generate")
+    @limiter.limit("10/minute")
     def generate(req: GenerateRequest, request: Request):
         """Live "replay generation": run an LLM over a trace's captured context
         (or an ad-hoc prompt), log it back into the trace, and return the answer
@@ -167,6 +171,41 @@ def build_router() -> APIRouter:
             "output_tokens": result.get("output_tokens"),
             "cost": cost, "duration_ms": duration_ms,
         }
+
+    # --------------------------------------------------- eval (LLM-as-judge)
+
+    @router.post("/eval/{trace_id}")
+    @limiter.limit("20/minute")
+    def run_eval(trace_id: str, request: Request, model: str = "llama3-8b-8192"):
+        """Run faithfulness + answer_relevance scoring on a trace via Groq.
+
+        Requires ``GROQ_API_KEY`` set in the server environment.
+        Scores are persisted and returned with the trace via ``GET /api/traces/{id}``.
+        """
+        from ..eval import evaluate_trace
+
+        s = store(request)
+        t = s.get_trace(trace_id)
+        if t is None:
+            raise HTTPException(404, "trace not found")
+        try:
+            scores = evaluate_trace(t, model=model)
+        except RuntimeError as e:
+            raise HTTPException(502, str(e))
+
+        project = t["trace"].get("project", "default")
+        for metric, result in scores.items():
+            s.set_eval_score(
+                trace_id, project, metric,
+                result.get("score"), result.get("reason", ""), model,
+            )
+        return {"trace_id": trace_id, **scores}
+
+    @router.get("/eval/{trace_id}")
+    def get_eval(trace_id: str, request: Request):
+        """Return previously computed eval scores for a trace."""
+        scores = store(request).get_eval_scores(trace_id)
+        return {"trace_id": trace_id, "scores": scores}
 
     return router
 

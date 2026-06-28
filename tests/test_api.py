@@ -1,14 +1,28 @@
+import os
+
 import pytest
 from fastapi.testclient import TestClient
 
 from ragobserve.events import RagEvent, Stage, content_hash
 from ragobserve.server.app import create_app
 
+_TEST_KEY = "test-api-key-ragobserve"
+
 
 @pytest.fixture
-def client(tmp_path):
+def client(tmp_path, monkeypatch):
+    monkeypatch.setenv("RAGOBSERVE_API_KEY", _TEST_KEY)
     app = create_app(str(tmp_path / "api.db"))
-    with TestClient(app) as c:
+    with TestClient(app, headers={"Authorization": f"Bearer {_TEST_KEY}"}) as c:
+        yield c
+    app.state.store.close()
+
+
+@pytest.fixture
+def unauth_client(tmp_path, monkeypatch):
+    monkeypatch.setenv("RAGOBSERVE_API_KEY", _TEST_KEY)
+    app = create_app(str(tmp_path / "unauth.db"))
+    with TestClient(app, raise_server_exceptions=False) as c:
         yield c
     app.state.store.close()
 
@@ -80,3 +94,56 @@ def test_dashboard_pages_render(client):
         r = client.get(path)
         assert r.status_code == 200
         assert "RAGObserve" in r.text
+
+
+# ---------------------------------------------------------------------------
+# Auth tests
+# ---------------------------------------------------------------------------
+
+def test_no_key_returns_401(unauth_client):
+    assert unauth_client.get("/api/projects").status_code == 401
+    assert unauth_client.post("/api/events", json={"events": []}).status_code == 401
+
+
+def test_wrong_key_returns_401(unauth_client):
+    r = unauth_client.get("/api/projects", headers={"Authorization": "Bearer wrong-key"})
+    assert r.status_code == 401
+
+
+def test_x_api_key_header_accepted(tmp_path, monkeypatch):
+    monkeypatch.setenv("RAGOBSERVE_API_KEY", _TEST_KEY)
+    app = create_app(str(tmp_path / "xkey.db"))
+    with TestClient(app) as c:
+        r = c.get("/api/projects", headers={"X-Api-Key": _TEST_KEY})
+        assert r.status_code == 200
+    app.state.store.close()
+
+
+def test_dashboard_pages_no_auth_required(unauth_client):
+    # HTML shell pages are unauthenticated — only /api/* routes require the key
+    for path in ["/", "/traces", "/chunks", "/metrics"]:
+        assert unauth_client.get(path).status_code == 200
+
+
+def test_api_key_in_app_state(tmp_path, monkeypatch):
+    monkeypatch.setenv("RAGOBSERVE_API_KEY", _TEST_KEY)
+    app = create_app(str(tmp_path / "state.db"))
+    assert app.state.api_key == _TEST_KEY
+    app.state.store.close()
+
+
+# ---------------------------------------------------------------------------
+# Health endpoint
+# ---------------------------------------------------------------------------
+
+def test_health_no_auth_required(unauth_client):
+    r = unauth_client.get("/health")
+    assert r.status_code == 200
+    assert r.json()["status"] == "ok"
+
+
+def test_health_returns_version(client):
+    r = client.get("/health")
+    body = r.json()
+    assert "version" in body
+    assert body["version"] != ""

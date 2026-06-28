@@ -63,8 +63,15 @@ def content_hash(text: str) -> str:
 
 
 def estimate_tokens(text: str) -> int:
-    """Cheap token estimate (~4 chars/token) so we avoid a tokenizer dependency."""
-    return max(1, len(text) // 4)
+    """Count tokens. Uses tiktoken (cl100k_base) when installed, else len//4 fallback."""
+    try:
+        import tiktoken
+        enc = getattr(estimate_tokens, "_enc", None)
+        if enc is None:
+            estimate_tokens._enc = tiktoken.get_encoding("cl100k_base")  # type: ignore[attr-defined]
+        return len(estimate_tokens._enc.encode(text))  # type: ignore[attr-defined]
+    except ImportError:
+        return max(1, len(text) // 4)  # ponytail: ±25%; pip install tiktoken for exact counts
 
 
 class RagEvent(BaseModel):

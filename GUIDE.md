@@ -1,10 +1,12 @@
 # RAGObserve — Complete Guide
 
+> v0.4.0
+
 **Local-first observability, debugging, and evaluation for RAG systems. The "MLflow for RAG."**
 
 This is the full reference. It is written so that **a coding agent (even a small model) can read one section and add the exact, correct instrumentation** — and so that a human can use it as a docs site. Every public function, every framework adapter, every vector-DB wrapper, and every CLI command is documented with copy-paste examples.
 
-RAGObserve records the whole retrieval lifecycle into a single local SQLite file and gives you a dashboard. **No server, no account, no cloud required.**
+RAGObserve records the whole retrieval lifecycle into a single local SQLite file and gives you a dashboard. **No server, no account, no cloud required.** Scale up to Postgres or any cloud storage when you're ready.
 
 ---
 
@@ -14,20 +16,25 @@ RAGObserve records the whole retrieval lifecycle into a single local SQLite file
 2. [Install](#2-install)
 3. [The mental model](#3-the-mental-model)
 4. [Initialize (once at startup)](#4-initialize-once-at-startup)
-5. [Two ways to instrument — pick ONE per pipeline](#5-two-ways-to-instrument--pick-one-per-pipeline)
-6. [Way A — Manual SDK (works with any framework)](#6-way-a--manual-sdk-works-with-any-framework)
-7. [Logger reference (every `log_*` function)](#7-logger-reference-every-log_-function)
-8. [Way B — Framework adapters (auto-capture)](#8-way-b--framework-adapters-auto-capture)
-   - [LangChain](#81-langchain)
-   - [LlamaIndex](#82-llamaindex)
-9. [Vector database wrappers](#9-vector-database-wrappers)
-10. [Cost tracking](#10-cost-tracking)
-11. [The CLI & dashboard](#11-the-cli--dashboard)
-12. [Live generation replay](#12-live-generation-replay)
-13. [Local vs server (HTTP) mode](#13-local-vs-server-http-mode)
-14. [Recipes — full copy-paste pipelines](#14-recipes--full-copy-paste-pipelines)
-15. [Gotchas & troubleshooting](#15-gotchas--troubleshooting)
-16. [Quick decision tree (for agents)](#16-quick-decision-tree-for-agents)
+5. [Storage backends — do I need to create tables?](#5-storage-backends--do-i-need-to-create-tables)
+6. [Two ways to instrument — pick ONE per pipeline](#6-two-ways-to-instrument--pick-one-per-pipeline)
+7. [Way A — Manual SDK (works with any framework)](#7-way-a--manual-sdk-works-with-any-framework)
+8. [Logger reference (every `log_*` function)](#8-logger-reference-every-log_-function)
+9. [Way B — Framework adapters (auto-capture)](#9-way-b--framework-adapters-auto-capture)
+   - [LangChain](#91-langchain)
+   - [LlamaIndex](#92-llamaindex)
+10. [Vector database wrappers](#10-vector-database-wrappers)
+11. [Cost tracking](#11-cost-tracking)
+12. [The CLI & dashboard](#12-the-cli--dashboard)
+13. [Live generation replay](#13-live-generation-replay)
+14. [Local vs server (HTTP) mode](#14-local-vs-server-http-mode)
+15. [Async support](#15-async-support)
+16. [Recipes — full copy-paste pipelines](#16-recipes--full-copy-paste-pipelines)
+17. [Gotchas & troubleshooting](#17-gotchas--troubleshooting)
+18. [Quick decision tree (for agents)](#18-quick-decision-tree-for-agents)
+19. [Auth & security](#19-auth--security)
+20. [LLM evaluation metrics](#20-llm-evaluation-metrics)
+21. [Export & WebSocket live feed](#21-export--websocket-live-feed)
 
 ---
 
@@ -45,6 +52,10 @@ RAGObserve captures, per query, the entire RAG pipeline and shows it as a **wate
 - **Metrics** — Precision@k, Recall@k, MRR, nDCG (from logged ground truth) + chunk utilization
 - **Generations & cost** — per-model / per-day token & dollar breakdowns, plus the captured context per generation
 - **Live replay** — re-run any captured context against a live LLM provider, logged back into the trace
+- **LLM evaluation** — faithfulness and answer relevance scores via Groq LLM-as-judge (`evaluate_trace`, `ragobserve eval`)
+- **Auth & rate limiting** — API key auth on all REST/WebSocket endpoints; rate limits per endpoint
+- **Health endpoint** — `GET /health` for load balancer / readiness probes (no auth)
+- **Export** — NDJSON export per project (`ragobserve export`) for offline analysis
 
 It is **framework-agnostic, provider-agnostic, and vector-DB-agnostic**.
 
@@ -56,6 +67,12 @@ It is **framework-agnostic, provider-agnostic, and vector-DB-agnostic**.
 pip install ragobserve                 # core (fastapi, uvicorn, jinja2, pydantic, httpx)
 pip install ragobserve[langchain]      # + LangChain adapter
 pip install ragobserve[llamaindex]     # + LlamaIndex adapter
+pip install ragobserve[postgres]       # + PostgreSQL backend (psycopg2-binary)
+pip install ragobserve[files]          # + FileStore via fsspec (S3, GCS, Azure, Drive, local)
+pip install ragobserve[files] s3fs     #   → Amazon S3
+pip install ragobserve[files] gcsfs    #   → Google Cloud Storage
+pip install ragobserve[files] adlfs    #   → Azure Blob / ADLS Gen2
+pip install ragobserve[files] gdrivefs #   → Google Drive
 pip install ragobserve[dev]            # + pytest (for contributing)
 ```
 
@@ -102,22 +119,139 @@ ragobserve.init(project="my-rag", tracking_uri="http://localhost:5601")
 
 # Custom database path:
 ragobserve.init(project="my-rag", db_path="/abs/path/store.db")
+
+# PostgreSQL backend:
+ragobserve.init(project="my-rag", store=ragobserve.PostgresStore("postgresql://user:pass@host/db"))
+
+# Any custom backend:
+ragobserve.init(project="my-rag", store=MyStore())
 ```
 
 | Argument | Default | Meaning |
 |---|---|---|
 | `project` | `"default"` | Logical project name; groups traces in the dashboard |
-| `tracking_uri` | `None` | If set, send events over HTTP to a running server. If unset, write directly to local SQLite |
-| `db_path` | `None` | Local mode only. Defaults to hidden `./.ragobserve/ragobserve.db` |
+| `tracking_uri` | `None` | If set, send events over HTTP to a running server. If unset, write directly to the local store |
+| `db_path` | `None` | Local SQLite file path. Defaults to hidden `./.ragobserve/ragobserve.db` |
+| `store` | `None` | Any `BaseStore`-compatible backend (PostgresStore, FileStore, MultiStore, or custom) |
+
+Priority when multiple options given: `tracking_uri` > `store` > `db_path` > local default.
 
 Notes:
-- No `tracking_uri` → writes straight to SQLite, synchronous, nothing to flush.
+- No `tracking_uri` and no `store` → writes straight to SQLite, synchronous, nothing to flush.
 - A legacy visible `./ragobserve.db` is auto-migrated into `./.ragobserve/` on first use.
 - The folder is hidden (like `.git`).
 
 ---
 
-## 5. Two ways to instrument — pick ONE per pipeline
+## 5. Storage backends — do I need to create tables?
+
+**No. All tables and schemas are created automatically. You never run migrations or DDL manually.**
+
+| Backend | What happens automatically |
+|---|---|
+| **SQLiteStore** (default) | `.ragobserve/ragobserve.db` and the full schema are created on first `init()` |
+| **PostgresStore** | all tables created via `CREATE TABLE IF NOT EXISTS` on first connect |
+| **FileStore** (S3 / GCS / Azure / Drive / local) | directories / prefixes created on first write |
+
+### SQLiteStore (default — zero config)
+
+```python
+ragobserve.init(project="dev")                              # default hidden path
+ragobserve.init(project="dev", db_path="/data/store.db")   # custom path
+ragobserve.init(project="dev", store=ragobserve.SQLiteStore("/data/store.db"))
+```
+
+### PostgresStore (team / production)
+
+Full read/write. All dashboard views work identically to SQLite. Best for shared deployments.
+
+```python
+ragobserve.init(
+    project="prod",
+    store=ragobserve.PostgresStore("postgresql://user:pass@host:5432/dbname"),
+)
+```
+
+- Requires `pip install ragobserve[postgres]`.
+- Tables (`projects`, `traces`, `events`, `chunks`, `chunk_retrievals`, `ground_truth`) created automatically on first connect — no migration scripts needed.
+- Attributes stored as JSONB; all cost/metrics queries work out of the box.
+- Connection string passed straight to psycopg2 — all psycopg2 options work (`sslmode`, PgBouncer DSNs, etc.).
+
+### FileStore (cloud archive — write-only)
+
+Appends events as JSONL to any [fsspec](https://filesystem-spec.readthedocs.io)-compatible filesystem. One interface for every cloud:
+
+```python
+ragobserve.init(project="prod", store=ragobserve.FileStore("s3://my-bucket/rag-events/"))
+ragobserve.init(project="prod", store=ragobserve.FileStore("gs://my-bucket/rag-events/"))
+ragobserve.init(project="prod", store=ragobserve.FileStore("az://my-container/rag-events/"))
+ragobserve.init(project="prod", store=ragobserve.FileStore("gdrive://My Drive/rag-events/"))
+ragobserve.init(project="prod", store=ragobserve.FileStore("/local/archive/"))
+
+# Extra fsspec / auth options:
+ragobserve.init(project="prod", store=ragobserve.FileStore(
+    "s3://my-bucket/events/",
+    key="ACCESS_KEY", secret="SECRET_KEY",
+    client_kwargs={"region_name": "us-east-1"},
+))
+```
+
+Each event is stored at `<root>/<project>/<YYYY-MM-DD>/<event_id>.jsonl`.
+
+FileStore is **write-only** — dashboard reads are not supported. Options:
+
+- Query offline with DuckDB, Athena, BigQuery.
+- Combine with `MultiStore` so a SQL backend handles dashboard reads (see below).
+
+Requires `pip install ragobserve[files]` plus the matching driver (`s3fs`, `gcsfs`, `adlfs`, `gdrivefs`).
+
+### S3Store (convenience shorthand for S3)
+
+```python
+store = ragobserve.S3Store("my-bucket", prefix="rag-events/", region="us-east-1")
+ragobserve.init(project="prod", store=store)
+```
+
+Equivalent to `FileStore("s3://my-bucket/rag-events/")`. Requires `pip install ragobserve[files] s3fs`.
+
+### MultiStore (fan-out — dashboard + durable archive)
+
+Writes to every backend simultaneously. Reads delegate to the first backend that supports them. The canonical production pattern:
+
+```python
+store = ragobserve.MultiStore([
+    ragobserve.SQLiteStore(),                        # primary: dashboard reads
+    ragobserve.FileStore("s3://my-bucket/events/"),  # sink: durable S3 archive
+])
+ragobserve.init(project="prod", store=store)
+```
+
+Write failures in any backend are caught and swallowed — observability must never crash the app.
+
+### Bring your own backend
+
+Any object with `ingest_events`, `set_ground_truth`, and `close` qualifies:
+
+```python
+class MyStore:
+    def ingest_events(self, events: list) -> int:
+        ...
+        return len(events)
+
+    def set_ground_truth(self, trace_id, project, relevant_chunk_ids):
+        ...
+
+    def close(self):
+        ...
+
+    # optional: add list_traces, get_trace, etc. to power the dashboard
+
+ragobserve.init(project="prod", store=MyStore())
+```
+
+---
+
+## 6. Two ways to instrument — pick ONE per pipeline
 
 | | Way A: Manual SDK | Way B: Framework adapter |
 |---|---|---|
@@ -129,7 +263,7 @@ Notes:
 
 ---
 
-## 6. Way A — Manual SDK (works with any framework)
+## 7. Way A — Manual SDK (works with any framework)
 
 Wrap a query in `ragobserve.trace(...)`, then call loggers inside. All loggers attach to the active trace automatically.
 
@@ -153,12 +287,16 @@ with ragobserve.trace("query", query=question):
 with ragobserve.trace("query", query=question):
     ...
 
-# 2. decorator
+# 2. async context manager (identical interface, safe in async code)
+async with ragobserve.trace("query", query=question):
+    ...
+
+# 3. decorator
 @ragobserve.trace
 def retrieve(query):
     ...
 
-# 3. nested (parent/child spans, automatic via contextvars)
+# 4. nested (parent/child spans, automatic via contextvars)
 with ragobserve.trace("query", query=q):
     with ragobserve.trace("retrieve"):
         ...
@@ -187,7 +325,7 @@ ragobserve.log_retrieval(question, results, retriever="qdrant")
 
 ---
 
-## 7. Logger reference (every `log_*` function)
+## 8. Logger reference (every `log_*` function)
 
 All are top-level: `ragobserve.log_*`. All attach to the active `trace()`.
 
@@ -248,15 +386,16 @@ Helpers also exported:
 
 - `ragobserve.current_trace_id()` — the active trace id (or `None`).
 - `ragobserve.flush()` — flush buffered events (only meaningful in server/HTTP mode).
+- `ragobserve.serve(host=..., port=..., db_path=...)` — start the dashboard from Python (see §12).
 - `ragobserve.Chunk`, `ragobserve.RagEvent`, `ragobserve.Stage` — model types if you want them.
 
-> **Note on `log_generation`:** the `prompt=` you pass is what shows under "Context / prompt used". Pass the **full assembled prompt** (with the injected chunks), not the bare user question — otherwise the dashboard's context view will look empty. See [Gotchas](#15-gotchas--troubleshooting).
+> **Note on `log_generation`:** the `prompt=` you pass is what shows under "Context / prompt used". Pass the **full assembled prompt** (with the injected chunks), not the bare user question — otherwise the dashboard's context view will look empty. See [Gotchas](#17-gotchas--troubleshooting).
 
 ---
 
-## 8. Way B — Framework adapters (auto-capture)
+## 9. Way B — Framework adapters (auto-capture)
 
-### 8.1 LangChain
+### 9.1 LangChain
 
 ```python
 from ragobserve.adapters import (
@@ -308,7 +447,7 @@ Notes:
 - The handler emits **context_assembly** automatically (the prompt sent to the model is the assembled context) — no manual `log_context` needed.
 - `instrument_*` return real subclasses/proxies — pass them exactly where the originals went.
 
-### 8.2 LlamaIndex
+### 9.2 LlamaIndex
 
 **One call instruments the global dispatcher — ingest and query, all stages, no other code changes.**
 
@@ -358,7 +497,7 @@ print(engine.query("what is the notice period?"))   # fully traced
 
 ---
 
-## 9. Vector database wrappers
+## 10. Vector database wrappers
 
 Wrap a live client/collection once; every query becomes a retrieval event — no manual `log_retrieval`. Duck-typed: importing these never requires the DB package installed. Everything except the query method passes straight through.
 
@@ -400,7 +539,7 @@ Use a wrapper **or** the LlamaIndex/LangChain adapter, not both for the same cal
 
 ---
 
-## 10. Cost tracking
+## 11. Cost tracking
 
 Cost is **auto-backfilled** at ingest from the model id + token counts, using a built-in price book (`ragobserve/server/pricing.py`, USD per 1M tokens). So you usually only log `model` + `input_tokens` + `output_tokens`:
 
@@ -414,12 +553,22 @@ ragobserve.log_generation(model="gpt-4o", input_tokens=812, output_tokens=197)  
 
 ---
 
-## 11. The CLI & dashboard
+## 12. The CLI & dashboard
 
 ```bash
-ragobserve ui          # start dashboard at http://127.0.0.1:5601
-ragobserve providers   # list LLM providers and which have API keys set
-ragobserve version     # print version
+ragobserve ui                                           # start dashboard at http://127.0.0.1:5601?key=<key>
+ragobserve export --project my-rag --output out.ndjson  # export traces to NDJSON
+ragobserve eval   --project my-rag --api-key gsk_...    # batch-eval traces with Groq
+ragobserve providers                                    # list LLM providers and which have API keys set
+ragobserve version                                      # print version
+```
+
+Or start the dashboard directly from Python (no terminal needed):
+
+```python
+ragobserve.serve()                              # same as ragobserve ui, default port 5601
+ragobserve.serve(host="0.0.0.0", port=8080)    # custom host/port
+ragobserve.serve(db_path="/data/store.db")     # custom store path
 ```
 
 `ragobserve ui` flags / environment variables:
@@ -429,6 +578,26 @@ ragobserve version     # print version
 | `--host` | `RAGOBSERVE_HOST` | `127.0.0.1` |
 | `--port` | `RAGOBSERVE_PORT` | `5601` |
 | `--backend-store-uri` | `RAGOBSERVE_STORE` | hidden `./.ragobserve/ragobserve.db` |
+| `--key` | `RAGOBSERVE_API_KEY` | auto-generated |
+
+`export` flags:
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--project` | required | project to export |
+| `--output` / `-o` | stdout | NDJSON output file |
+| `--limit` | all | max traces |
+| `--backend-store-uri` | local default | SQLite path or `postgresql://...` |
+
+`eval` flags:
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--project` | required | project to evaluate |
+| `--api-key` | `$GROQ_API_KEY` | Groq API key |
+| `--model` | `llama3-8b-8192` | Groq model |
+| `--limit` | all | max traces |
+| `--backend-store-uri` | local default | SQLite path or `postgresql://...` |
 
 Example (bind all interfaces, custom port and DB — useful in containers):
 
@@ -440,7 +609,7 @@ Run the UI from the same working directory as your app (so it finds `./.ragobser
 
 ---
 
-## 12. Live generation replay
+## 13. Live generation replay
 
 From any trace's **Generation** or **Context** view, re-run an LLM over the *captured context* — to debug grounding, compare models, or fill in a generation that was never logged. The new generation is logged back into the same trace with its cost.
 
@@ -466,12 +635,12 @@ A provider is "ready" when its key is set (or, for Ollama, always). Check with `
 
 ---
 
-## 13. Local vs server (HTTP) mode
+## 14. Local vs server (HTTP) mode
 
 | | Local (default) | Server / HTTP |
 |---|---|---|
 | Set via | `init(project=...)` | `init(project=..., tracking_uri="http://host:5601")` |
-| Writes | directly to SQLite, synchronous | batched on a background thread, POSTed to the server |
+| Writes | directly to the store, synchronous | batched on a background thread, POSTed to the server |
 | When | single process / one app | many processes / app and dashboard on different hosts |
 | Flush | not needed | automatic on exit; call `ragobserve.flush()` to force |
 
@@ -488,9 +657,40 @@ ragobserve.init(project="my-rag", tracking_uri="http://that-host:5601")
 
 ---
 
-## 14. Recipes — full copy-paste pipelines
+## 15. Async support
 
-### 14.1 Custom pipeline (manual SDK)
+All `log_*` functions and `ragobserve.trace` are safe to call from async code without blocking the event loop.
+
+```python
+import ragobserve
+ragobserve.init(project="async-rag")
+
+async def answer(question):
+    async with ragobserve.trace("query", query=question):
+        results = await retriever.asearch(question, k=5)
+        ragobserve.log_retrieval(question, results, retriever="qdrant")
+
+        prompt = build_prompt(question, results)
+        ragobserve.log_context(prompt, query=question, chunks=results)
+
+        resp = await llm.acomplete(prompt)
+        ragobserve.log_generation(model="gpt-4o", response=resp.text,
+                                  input_tokens=resp.usage.input_tokens,
+                                  output_tokens=resp.usage.output_tokens)
+        return resp.text
+```
+
+How it works under the hood:
+
+- **LocalClient (SQLite):** when called inside a running asyncio loop, the SQLite write is offloaded to the default thread-pool executor via `loop.run_in_executor` — the event loop is never blocked. In synchronous code (scripts, pytest) the write is inline.
+- **HttpClient:** `log_event` puts to an in-memory queue; a background daemon thread flushes — always non-blocking.
+- `__aexit__` is implemented on `_TraceHandle` so `async with ragobserve.trace(...)` works natively.
+
+---
+
+## 16. Recipes — full copy-paste pipelines
+
+### 16.1 Custom pipeline (manual SDK)
 
 ```python
 import ragobserve
@@ -513,7 +713,28 @@ def answer(question, retriever, llm):
 # then: ragobserve ui
 ```
 
-### 14.2 LangChain RAG (ingest + query)
+### 16.2 Async pipeline
+
+```python
+import ragobserve
+ragobserve.init(project="async-demo")
+
+async def answer(question):
+    async with ragobserve.trace("query", query=question):
+        hits = await retriever.asearch(question, k=5)
+        ragobserve.log_retrieval(question, hits, retriever="qdrant")
+
+        prompt = build_prompt(question, hits)
+        ragobserve.log_context(prompt, query=question, chunks=hits)
+
+        resp = await llm.acomplete(prompt)
+        ragobserve.log_generation(model="gpt-4o", response=resp.text,
+                                  input_tokens=resp.usage.input_tokens,
+                                  output_tokens=resp.usage.output_tokens)
+        return resp.text
+```
+
+### 16.3 LangChain RAG (ingest + query)
 
 ```python
 import ragobserve
@@ -539,7 +760,7 @@ chain.invoke("notice period?", config={"callbacks": [RagObserveCallbackHandler()
 # then: ragobserve ui
 ```
 
-### 14.3 LlamaIndex RAG
+### 16.4 LlamaIndex RAG
 
 ```python
 import ragobserve
@@ -556,7 +777,7 @@ engine.query("notice period?")                   # retrieval + context + generat
 # then: ragobserve ui
 ```
 
-### 14.4 Standalone vector DB (no framework)
+### 16.5 Standalone vector DB (no framework)
 
 ```python
 import ragobserve
@@ -568,9 +789,51 @@ hits = qc.search(collection_name="docs", query_vector=vec, limit=5)   # auto-log
 ragobserve.log_generation(model="gpt-4o", input_tokens=700, output_tokens=150)
 ```
 
+### 16.6 PostgreSQL backend (team / production)
+
+```python
+import ragobserve
+
+# Tables are created automatically on first connect — no migration needed
+ragobserve.init(
+    project="prod",
+    store=ragobserve.PostgresStore("postgresql://user:pass@db.internal:5432/ragobserve"),
+)
+
+# instrument your pipeline exactly as in any other recipe
+with ragobserve.trace("query", query=question):
+    ragobserve.log_retrieval(question, results, retriever="qdrant")
+    ragobserve.log_generation(model="gpt-4o", input_tokens=800, output_tokens=200)
+
+# dashboard (reads from Postgres):
+# ragobserve ui --backend-store-uri postgresql://user:pass@db.internal:5432/ragobserve
+```
+
+### 16.7 Cloud archive + local dashboard (MultiStore)
+
+```python
+import ragobserve
+
+# Events written to both SQLite (for the dashboard) and S3 (durable archive)
+ragobserve.init(
+    project="prod",
+    store=ragobserve.MultiStore([
+        ragobserve.SQLiteStore(),                        # primary: dashboard reads
+        ragobserve.FileStore("s3://my-bucket/events/"),  # sink: S3 archive (query with Athena/DuckDB)
+    ]),
+)
+
+with ragobserve.trace("query", query=question):
+    ragobserve.log_retrieval(question, results, retriever="pinecone")
+    ragobserve.log_generation(model="claude-opus-4-8", input_tokens=900, output_tokens=300)
+
+# ragobserve ui   →  reads from local SQLite
+# Athena / DuckDB →  reads from S3
+```
+
 ---
 
-## 15. Gotchas & troubleshooting
+## 17. Gotchas & troubleshooting
 
 1. **Don't mix manual SDK and adapter handlers in one trace** → it splits one query into two traces. Pick one per pipeline.
 2. **"I can't see the retrieved chunks in the context / prompt."** You likely passed the bare question to `log_generation(prompt=...)`, or called `log_context` from a *different* retrieval pass than the one the LLM actually used. Fix: pass the **full assembled prompt** (with chunks) to `log_context(final_prompt=...)` and `log_generation(prompt=...)`, or — better for LangChain/LlamaIndex — let the adapter capture it (it grabs the real prompt the model saw). With LlamaIndex, calling `engine.query()` after `register()` captures the true context; manual logging around it does not and conflicts.
@@ -580,14 +843,32 @@ ragobserve.log_generation(model="gpt-4o", input_tokens=700, output_tokens=150)
 6. **Unknown model → no cost.** Add it to `PRICE_BOOK` in `ragobserve/server/pricing.py`.
 7. **Scores/source show "—"** → you passed bare strings. Pass dicts/doc objects with `score` and `source` (or `metadata.source`).
 8. **Dashboard is empty** → run `ragobserve ui` from the same directory as your app (so it finds `./.ragobserve/ragobserve.db`), or pass `--backend-store-uri`. In HTTP mode, make sure the server is running and `tracking_uri` points to it.
-9. **Version drift is loud, not silent** — if an `instrument_*` target lacks the expected method, or a LlamaIndex event class vanished, you get a `RagObserveWarning` (`ragobserve._diag.RagObserveWarning`) instead of empty capture. Watch your logs.
-10. **Observability never crashes the app** — logging failures are caught and swallowed by design.
+9. **Tables not found (Postgres)** → this should never happen — `PostgresStore` creates them on connect. If it does, check that the DB user has `CREATE TABLE` privileges on the target schema.
+10. **FileStore reads raise `NotImplementedError`** → expected. FileStore is write-only. Use `MultiStore` with a SQL primary backend if you need the dashboard.
+11. **Version drift is loud, not silent** — if an `instrument_*` target lacks the expected method, or a LlamaIndex event class vanished, you get a `RagObserveWarning` (`ragobserve._diag.RagObserveWarning`) instead of empty capture. Watch your logs.
+12. **Observability never crashes the app** — logging failures are caught and swallowed by design.
 
 ---
 
-## 16. Quick decision tree (for agents)
+## 18. Quick decision tree (for agents)
 
 ```
+Where should events be stored?
+  → local dev / single process:
+      ragobserve.init(project="...")                         # SQLite default, zero config
+
+  → team / shared dashboard:
+      ragobserve.init(project="...", store=ragobserve.PostgresStore("postgresql://..."))
+
+  → durable cloud archive + local dashboard:
+      ragobserve.init(project="...", store=ragobserve.MultiStore([
+          ragobserve.SQLiteStore(),
+          ragobserve.FileStore("s3://bucket/"),   # or gs://, az://, gdrive://
+      ]))
+
+  → cloud archive only (query with Athena/DuckDB, no live dashboard):
+      ragobserve.init(project="...", store=ragobserve.FileStore("s3://bucket/"))
+
 Are you using LlamaIndex?
   → yes: ragobserve.init(...); from ragobserve.adapters.llamaindex import register; register()
          wrap rerankers with instrument_postprocessor(...). DO NOT add manual log_* calls.
@@ -604,13 +885,202 @@ Using a raw vector DB client, no framework?
     then log_generation(model=..., input_tokens=..., output_tokens=...) for cost.
 
 Fully custom pipeline?
-  → with ragobserve.trace("query", query=q):
+  → with ragobserve.trace("query", query=q):      # sync
+    async with ragobserve.trace("query", query=q): # async — identical interface
         log_retrieval(...); [log_fusion]; [log_rerank]; log_context(...); log_generation(...)
     pass dicts (text/score/source) so scores & sources render.
 
-Always finish with:  ragobserve ui   →  http://127.0.0.1:5601
+Always finish with:
+  ragobserve ui          →  http://127.0.0.1:5601  (CLI)
+  ragobserve.serve()     →  same, from Python
 ```
 
 ---
 
-*RAGObserve is local-first: your traces stay in `./.ragobserve/ragobserve.db` on your machine unless you deliberately run a shared server.*
+---
+
+## 19. Auth & security
+
+All `/api/*` routes and the WebSocket `/ws/traces` require an API key when running in server mode.
+
+### Key management
+
+```bash
+# Auto-generated on startup (stable per process lifetime), printed in the console
+ragobserve ui
+# → Dashboard: http://127.0.0.1:5601?key=AbCdEf...
+
+# Pin your own key
+RAGOBSERVE_API_KEY=mysecretkey ragobserve ui
+```
+
+### Client authentication
+
+Pass the key via either:
+
+```
+Authorization: Bearer <key>
+X-Api-Key: <key>
+```
+
+The SDK `HttpClient` sends `Authorization: Bearer` automatically when you call `ragobserve.init(api_key="...")`.
+
+### Dashboard
+
+The dashboard reads `?key=` from the URL on first visit, strips it from the address bar, and stores it in localStorage. Subsequent visits load the key from localStorage. On 401, the UI prompts for the key again.
+
+### WebSocket auth
+
+Connect with `?key=<key>` as a query param. The server accepts the connection *before* checking the key, then closes with code 4401 on mismatch (WebSocket protocol requires accept-before-close).
+
+### Rate limits
+
+| Endpoint | Limit |
+|---|---|
+| `POST /api/events` | 500/min |
+| `POST /api/generate` | 10/min |
+| `POST /api/eval/{trace_id}` | 20/min |
+
+Exceeding returns `HTTP 429`.
+
+### Health endpoint (no auth)
+
+```
+GET /health  →  {"status": "ok", "version": "0.4.0"}
+```
+
+No API key required. Use for load balancer health checks and Kubernetes readiness probes.
+
+---
+
+## 20. LLM evaluation metrics
+
+LLM-as-judge metrics for RAG quality, powered by Groq (fast, free tier via `llama3-8b-8192`).
+
+```python
+from ragobserve.eval import score_faithfulness, score_answer_relevance, evaluate_trace
+```
+
+### `score_faithfulness(answer, context, model=..., api_key=...)`
+
+How grounded is the answer in the retrieved context?
+
+```python
+result = score_faithfulness(
+    answer="The notice period is 90 days.",
+    context=["Notice period is 90 days as per clause 4."],
+    api_key="gsk_...",
+)
+# → {"score": 0.97, "reason": "All claims directly supported."}
+```
+
+- `context` — list of `str` or dicts with a `"text"` key (matches `log_retrieval` result shape)
+- Returns `{"score": None, "reason": "..."}` when context or answer is empty (no API call made)
+
+### `score_answer_relevance(answer, query, model=..., api_key=...)`
+
+How well does the answer address the original query?
+
+```python
+result = score_answer_relevance(
+    answer="90 days.",
+    query="What is the notice period?",
+    api_key="gsk_...",
+)
+# → {"score": 0.95, "reason": "Directly and completely answers the query."}
+```
+
+### `evaluate_trace(trace_data, model=..., api_key=...)`
+
+Run both metrics from a full trace dict (from `GET /api/traces/{trace_id}`). Extracts answer, context, and query automatically.
+
+```python
+trace_data = client.get("/api/traces/abc123").json()
+result = evaluate_trace(trace_data, api_key="gsk_...")
+# → {
+#     "faithfulness":     {"score": 0.93, "reason": "..."},
+#     "answer_relevance": {"score": 0.88, "reason": "..."},
+#   }
+```
+
+### Via the API
+
+```
+POST /api/eval/{trace_id}
+{"model": "llama3-8b-8192", "api_key": "gsk_..."}
+
+GET /api/eval/{trace_id}
+# → stored scores for that trace
+```
+
+### Via the CLI
+
+```bash
+# Evaluate all traces in a project and print results
+ragobserve eval --project my-rag --api-key gsk_...
+
+# Custom model, limit to first 20 traces, custom store
+ragobserve eval --project my-rag \
+  --api-key gsk_... \
+  --model llama3-70b-8192 \
+  --limit 20 \
+  --backend-store-uri postgresql://user:pass@host:5432/ragobs
+```
+
+### API key resolution order
+
+1. `api_key=` argument
+2. `GROQ_API_KEY` env var
+
+Raises `RuntimeError` if neither is set.
+
+---
+
+## 21. Export & WebSocket live feed
+
+### Export traces (NDJSON)
+
+```bash
+# To stdout
+ragobserve export --project my-rag
+
+# To file
+ragobserve export --project my-rag --output traces.ndjson
+
+# Postgres, limit to 100
+ragobserve export --project my-rag \
+  --backend-store-uri postgresql://user:pass@host:5432/ragobs \
+  --output traces.ndjson \
+  --limit 100
+```
+
+Each line is `{"trace": {...}, "events": [...]}` — ready for DuckDB, Pandas, or offline eval pipelines.
+
+### WebSocket live feed
+
+The **Query Explorer** dashboard auto-refreshes via WebSocket when new events arrive. To connect directly:
+
+```javascript
+const ws = new WebSocket(
+  "ws://localhost:5601/ws/traces?key=<apikey>&project=my-rag"
+);
+ws.onmessage = e => {
+  const msg = JSON.parse(e.data);
+  if (msg.type === "event") {
+    console.log("new event:", msg.data);
+  }
+  // msg.type === "ping" every ~30s (keepalive — ignore or reset your timeout)
+};
+ws.onerror = () => ws.close();
+ws.onclose = e => {
+  if (e.code !== 1000) setTimeout(reconnect, 3000);  // auto-reconnect
+};
+```
+
+- Omit `project` to receive events from all projects.
+- Close cleanly with code 1000 to suppress auto-reconnect.
+- Auth failure closes with code 4401.
+
+---
+
+*RAGObserve is local-first: your traces stay in `./.ragobserve/ragobserve.db` on your machine unless you deliberately choose a different backend.*

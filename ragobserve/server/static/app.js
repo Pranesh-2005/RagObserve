@@ -1,7 +1,47 @@
 /* Shared helpers for the RAGObserve dashboard (vanilla JS, no build step). */
 
+/* ── Auth ──────────────────────────────────────────────────────────────────
+   Key resolution order on every page load:
+     1. ?key=<k> query param  → stored in localStorage, stripped from URL
+     2. localStorage           → used for all subsequent navigations
+     3. User prompt            → stored in localStorage, page reloads
+   SDK callers: ragobserve.init(tracking_uri=..., api_key=<k>)
+   ──────────────────────────────────────────────────────────────────────── */
+
+function getApiKey() {
+  const params = new URLSearchParams(location.search);
+  const fromUrl = params.get("key");
+  if (fromUrl) {
+    localStorage.setItem("ragobserve_key", fromUrl);
+    params.delete("key");
+    const clean = params.toString() ? `${location.pathname}?${params}` : location.pathname;
+    history.replaceState({}, "", clean);
+    return fromUrl;
+  }
+  return localStorage.getItem("ragobserve_key") || "";
+}
+
+function showKeyPrompt() {
+  const key = prompt(
+    "RAGObserve API key required.\n\n" +
+    "Copy the key printed by serve() and paste it here, " +
+    "or open the URL printed by serve() directly."
+  );
+  if (key && key.trim()) {
+    localStorage.setItem("ragobserve_key", key.trim());
+    location.reload();
+  }
+}
+
 async function api(path) {
-  const r = await fetch(path);
+  const key = getApiKey();
+  const headers = key ? { "Authorization": `Bearer ${key}` } : {};
+  const r = await fetch(path, { headers });
+  if (r.status === 401) {
+    localStorage.removeItem("ragobserve_key");
+    showKeyPrompt();
+    throw new Error("Unauthorized");
+  }
   if (!r.ok) throw new Error(`${path} -> ${r.status}`);
   return r.json();
 }
@@ -55,6 +95,38 @@ function stageBadge(stage) {
 
 function statusBadge(status) {
   return `<span class="badge ${status === "error" ? "error" : "ok"}">${esc(status || "ok")}</span>`;
+}
+
+/* ── Live feed (WebSocket) ──────────────────────────────────────────────────
+   connectLiveFeed(project, onEvent) → returns WebSocket (call .close() to stop)
+
+   onEvent receives each new event dict as it is ingested by the server.
+   Reconnects automatically on error after 3 s.
+
+   Example (traces page auto-refresh):
+     connectLiveFeed(currentProject, () => loadTraces());
+   ────────────────────────────────────────────────────────────────────────── */
+
+function connectLiveFeed(project, onEvent) {
+  const key   = getApiKey();
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  const params = new URLSearchParams({ key, project: project || "" });
+  const url   = `${proto}://${location.host}/ws/traces?${params}`;
+
+  let ws;
+  function connect() {
+    ws = new WebSocket(url);
+    ws.onmessage = e => {
+      const msg = JSON.parse(e.data);
+      if (msg.type === "event" && onEvent) onEvent(msg.data);
+    };
+    ws.onerror = () => ws.close();
+    ws.onclose = e => {
+      if (e.code !== 1000) setTimeout(connect, 3000); // reconnect unless clean close
+    };
+  }
+  connect();
+  return { close: () => ws && ws.close(1000) };
 }
 
 /* Populate a <select> with project names; keep ?project= in sync and reload. */
