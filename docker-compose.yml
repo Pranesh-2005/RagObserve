@@ -1,0 +1,14 @@
+services:
+  ragobserve:
+    build: .
+    ports:
+      - "5601:5601"
+    volumes:
+      - ragobserve_data:/data
+    environment:
+      RAGOBSERVE_API_KEY: ${RAGOBSERVE_API_KEY:-}   # set or auto-generated on startup
+      GROQ_API_KEY: ${GROQ_API_KEY:-}               # optional: for ragobserve eval
+    restart: unless-stopped
+
+volumes:
+  ragobserve_data:

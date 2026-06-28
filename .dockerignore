@@ -1,0 +1,15 @@
+.git
+.ragobserve
+dist/
+build/
+*.egg-info/
+__pycache__/
+*.pyc
+*.pyo
+.env
+.env.*
+tests/
+examples/
+*.db
+*.ndjson
+traces.ndjson

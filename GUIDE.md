@@ -1,6 +1,6 @@
 # RAGObserve — Complete Guide
 
-> v0.4.0
+> v0.5.0
 
 **Local-first observability, debugging, and evaluation for RAG systems. The "MLflow for RAG."**
 
@@ -651,6 +651,8 @@ Run a server (the same `ragobserve ui` process serves both dashboard and the ing
 ```bash
 ragobserve ui --host 0.0.0.0 --port 5601
 ```
+
+> **Single-worker note:** The WebSocket live feed uses an in-process event bus. This works correctly with a single uvicorn worker (the default). If you scale to multiple workers (`--workers N`), events ingested by one worker won't reach WebSocket clients connected to another. For multi-worker deployments, disable the live feed or run behind a single-worker process. The REST API and dashboard work correctly at any worker count.
 ```python
 ragobserve.init(project="my-rag", tracking_uri="http://that-host:5601")
 ```
@@ -946,7 +948,7 @@ Exceeding returns `HTTP 429`.
 ### Health endpoint (no auth)
 
 ```
-GET /health  →  {"status": "ok", "version": "0.4.0"}
+GET /health  →  {"status": "ok", "version": "0.5.0"}
 ```
 
 No API key required. Use for load balancer health checks and Kubernetes readiness probes.

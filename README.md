@@ -1,6 +1,6 @@
 # RAGObserve
 
-> v0.4.0
+> v0.5.0
 
 **Local-first observability, debugging and evaluation for RAG systems. The MLflow for RAG.**
 
@@ -148,6 +148,23 @@ ragobserve.init(project="prod", store=MyStore())
 - **Chunk Explorer** — most retrieved / never retrieved (dead) / duplicate chunks
 - **Metrics** — Precision@k, Recall@k, MRR, nDCG over logged ground truth, plus chunk utilization
 - **Generations & cost** — Langfuse-style cost tracing: per-model / per-day token & $ breakdowns, charts, and the context that produced each generation. Costs are auto-backfilled from a built-in price book when you don't pass `cost=`.
+
+## Docker
+
+```bash
+# Docker Compose (recommended)
+docker compose up
+# → http://localhost:5601?key=<printed-key>
+
+# Or plain Docker
+docker build -t ragobserve .
+docker run -p 5601:5601 -v ragobserve_data:/data \
+  -e RAGOBSERVE_API_KEY=mysecretkey ragobserve
+```
+
+Data persists in the `ragobserve_data` named volume. Pass `GROQ_API_KEY` to enable `ragobserve eval` inside the container.
+
+> **Single worker:** the container runs one uvicorn worker by default — required for the WebSocket live feed.
 
 ## Auth
 

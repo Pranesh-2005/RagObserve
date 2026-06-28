@@ -27,9 +27,12 @@ Bring-your-own backend: implement BaseStore and pass it to init().
 from __future__ import annotations
 
 import json
+import logging
 import time
 from contextlib import contextmanager
 from typing import Any, Dict, Generator, List, Optional, Protocol, runtime_checkable
+
+_log = logging.getLogger("ragobserve")
 
 
 # ---------------------------------------------------------------------------
@@ -806,16 +809,16 @@ class MultiStore:
         for b in self._backends:
             try:
                 n = b.ingest_events(events)
-            except Exception:
-                pass
+            except Exception as _e:
+                _log.warning("MultiStore backend %s.ingest_events failed: %s", type(b).__name__, _e)
         return n
 
     def set_ground_truth(self, trace_id: str, project: str, relevant_chunk_ids: List[str]) -> None:
         for b in self._backends:
             try:
                 b.set_ground_truth(trace_id, project, relevant_chunk_ids)
-            except Exception:
-                pass
+            except Exception as _e:
+                _log.warning("MultiStore backend %s.set_ground_truth failed: %s", type(b).__name__, _e)
 
     def close(self) -> None:
         for b in self._backends:

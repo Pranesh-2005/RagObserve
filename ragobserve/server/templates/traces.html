@@ -18,7 +18,10 @@ async function load(project) {
     <table class="data">
       <thead><tr>
         <th>Query</th><th>Status</th><th>Latency</th><th>Cost</th>
-        <th>Retriever</th><th>Model</th><th>Chunks</th><th>Time</th>
+        <th>Retriever</th><th>Model</th><th>Chunks</th>
+        <th title="Faithfulness score (run ragobserve eval to populate)">Faith.</th>
+        <th title="Answer relevance score (run ragobserve eval to populate)">Relev.</th>
+        <th>Time</th>
       </tr></thead>
       <tbody>${traces.map(t => `
         <tr class="rowlink" onclick="location='/traces/${esc(t.trace_id)}?project=${encodeURIComponent(project)}'">
@@ -29,6 +32,8 @@ async function load(project) {
           <td class="mono">${esc(t.retriever || "—")}</td>
           <td class="mono">${esc(t.model || "—")}</td>
           <td>${t.chunk_count ?? 0}</td>
+          <td class="mono">${t.faithfulness_score != null ? fmtNum(t.faithfulness_score, 2) : "—"}</td>
+          <td class="mono">${t.answer_relevance_score != null ? fmtNum(t.answer_relevance_score, 2) : "—"}</td>
           <td class="muted small">${fmtTime(t.start_time)}</td>
         </tr>`).join("")}
       </tbody>

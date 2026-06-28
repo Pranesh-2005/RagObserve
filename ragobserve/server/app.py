@@ -25,6 +25,8 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
+    # ponytail: in-process bus only works with a single uvicorn worker.
+    # Multi-worker deployments need a Redis pub/sub bus — add when needed.
     bus.set_loop(asyncio.get_event_loop())
     yield
 

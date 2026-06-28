@@ -7,10 +7,13 @@ local single-user tool this v1 is.
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import threading
 import time
 from typing import Any, Dict, List, Optional
+
+_log = logging.getLogger("ragobserve")
 
 from ..events import content_hash, estimate_tokens
 from . import pricing
@@ -143,8 +146,8 @@ class Store:
             from . import bus
             for ev in events:
                 bus.publish(ev)
-        except Exception:
-            pass
+        except Exception as _e:
+            _log.warning("bus.publish failed: %s", _e)
         return len(events)
 
     def _ingest_one(self, cur: sqlite3.Cursor, ev: Dict[str, Any]) -> None:
@@ -301,7 +304,9 @@ class Store:
                      WHERE e.trace_id = t.trace_id AND e.stage='generation' LIMIT 1) AS model,
                   (SELECT json_extract(e.attributes,'$.retriever') FROM events e
                      WHERE e.trace_id = t.trace_id AND e.stage='retrieval' LIMIT 1) AS retriever,
-                  (SELECT COUNT(*) FROM chunk_retrievals c WHERE c.trace_id = t.trace_id) AS chunk_count
+                  (SELECT COUNT(*) FROM chunk_retrievals c WHERE c.trace_id = t.trace_id) AS chunk_count,
+                  (SELECT score FROM eval_scores WHERE trace_id=t.trace_id AND metric='faithfulness' LIMIT 1) AS faithfulness_score,
+                  (SELECT score FROM eval_scores WHERE trace_id=t.trace_id AND metric='answer_relevance' LIMIT 1) AS answer_relevance_score
                 FROM traces t {where}
                 ORDER BY t.start_time DESC LIMIT ?
                 """,
