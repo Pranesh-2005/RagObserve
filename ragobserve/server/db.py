@@ -125,6 +125,13 @@ class Store:
         self._lock = threading.Lock()
         self._conn = sqlite3.connect(path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
+        # Every log_* call is its own transaction, so the default (journal_mode=delete,
+        # synchronous=FULL) costs one fsync per event — ~96ms per call on Windows.
+        # WAL + synchronous=NORMAL keeps crash-safety against process death and only
+        # risks the last commits on host power loss, which is the right trade for
+        # observability data sitting on an app's hot path.
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA synchronous=NORMAL")
         with self._lock:
             self._conn.executescript(SCHEMA)
             self._conn.commit()

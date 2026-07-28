@@ -55,6 +55,12 @@ def main(argv=None) -> int:
     # ── providers ───────────────────────────────────────────────────────────
     sub.add_parser("providers", help="list LLM providers available for generation replay")
 
+    # ── prices ──────────────────────────────────────────────────────────────
+    pr = sub.add_parser("prices", help="show or refresh the model price book")
+    pr.add_argument("--refresh", action="store_true",
+                    help="download the latest all-provider price feed")
+    pr.add_argument("--model", metavar="NAME", help="look up one model's rate")
+
     # ── version ─────────────────────────────────────────────────────────────
     sub.add_parser("version", help="print version and exit")
 
@@ -65,6 +71,36 @@ def main(argv=None) -> int:
     if args.command == "version":
         from . import __version__
         print(f"ragobserve {__version__}")
+        return 0
+
+    if args.command == "prices":
+        import datetime
+        from .server import pricing
+
+        if args.refresh:
+            try:
+                n = pricing.refresh()
+            except Exception as e:
+                print(f"price refresh failed: {e}", file=sys.stderr)
+                return 1
+            print(f"refreshed {n} models -> {pricing.cache_path()}")
+
+        if args.model:
+            price = pricing._lookup(args.model)
+            if price is None:
+                print(f"{args.model}: unknown (no cost will be estimated)")
+                return 1
+            print(f"{args.model}: ${price[0]:g} in / ${price[1]:g} out  per 1M tokens")
+            return 0
+
+        info = pricing.feed_info()
+        if info:
+            when = datetime.datetime.fromtimestamp(info["updated_at"]).strftime("%Y-%m-%d %H:%M")
+            print(f"feed     {info['count']} models, updated {when}")
+            print(f"source   {info['source']}")
+        else:
+            print("feed     not downloaded — run `ragobserve prices --refresh`")
+        print(f"builtin  {len(pricing.PRICE_BOOK)} models (offline fallback)")
         return 0
 
     if args.command == "providers":

@@ -61,6 +61,9 @@ class _TraceHandle:
         _client.get_client().log_event(span.model_dump())
         return False
 
+    async def __aenter__(self) -> RagEvent:
+        return self.__enter__()
+
     async def __aexit__(self, exc_type, exc, tb) -> bool:
         return self.__exit__(exc_type, exc, tb)
 

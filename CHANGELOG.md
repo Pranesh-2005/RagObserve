@@ -1,5 +1,56 @@
 # Changelog
 
+## [0.6.0] — 2026-07-28
+
+### Fixed
+- **Instrumentation latency cut ~138x.** SQLite opened with the default
+  `journal_mode=delete` + `synchronous=FULL`, so every `log_*` call paid its own
+  fsync. Now `WAL` + `synchronous=NORMAL`. Measured on Windows, 10-chunk
+  retrieval + ~5KB context + generation:
+
+  | Path | Before (median) | After (median) |
+  |---|---|---|
+  | `log_retrieval` | 96.6 ms | 1.1 ms |
+  | `log_context` | 96.1 ms | 1.4 ms |
+  | `log_generation` | 95.6 ms | 0.2 ms |
+  | full 4-span trace (sync) | 379.8 ms | 2.8 ms |
+  | full 4-span trace (async) | *raised TypeError* | 1.6 ms |
+
+  Crash-safety against process death is retained; only the last commits are at
+  risk on host power loss, which is the right trade for observability data
+  sitting on an app's hot path.
+- **`async with ragobserve.trace(...)` raised `TypeError`.** `_TraceHandle`
+  defined `__aexit__` but not `__aenter__`, so the async usage the README has
+  always documented could not run. Added `__aenter__`.
+- **Model cost overcharged up to 16x on `-mini` / `-nano` models.** The price
+  book's substring fallback returned the *first* matching key, so `gpt-4o-mini`
+  resolved to `gpt-4o` ($2.50/$10.00 instead of $0.15/$0.60). Lookup now prefers
+  the longest matching key.
+- **`ragobserve version` printed `0.3.0` on every release since 0.3.0.**
+  `__init__.__version__` was hardcoded and drifted from `pyproject.toml`; it is
+  now read from package metadata, the same source `/health` uses.
+
+### Added
+- **Automatic price refresh** — `ragobserve prices --refresh` pulls the
+  community-maintained [LiteLLM price feed](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json)
+  (~3,100 chat models across ~80 providers) and caches it to
+  `~/.ragobserve/prices.json`. The cached feed takes priority over the built-in
+  book, so costs stay current without waiting on a RAGObserve release. No vendor
+  is privileged — Anthropic, OpenAI, Google, xAI, Meta, Mistral, DeepSeek,
+  Cohere, Amazon, Alibaba and the hosted open-weight providers all come from the
+  same feed. Point `RAGOBSERVE_PRICE_FEED` at your own URL to override.
+  ```bash
+  ragobserve prices --refresh          # download latest
+  ragobserve prices                    # show feed status
+  ragobserve prices --model gpt-4o-mini
+  ```
+- **Built-in price book expanded** 32 → 73 models, covering Claude 5 / Opus 4.x,
+  GPT-5 family, Gemini 2.x, Grok, Llama 4, Qwen, Command, Nova, Magistral and
+  more. Still only the offline fallback — `--refresh` is the source of truth.
+- `pricing.refresh()`, `pricing.feed_info()`, `pricing.cache_path()` for
+  programmatic use.
+- `_lookup` is now `lru_cache`d (~1 µs per resolved model on the ingest path).
+
 ## [0.5.0] — 2026-06-28
 
 ### Added

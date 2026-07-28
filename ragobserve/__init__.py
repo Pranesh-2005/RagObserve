@@ -46,7 +46,12 @@ from .tracing import (
     trace,
 )
 
-__version__ = "0.3.0"
+try:  # single source of truth is pyproject.toml — this drifted to 0.3.0 once already
+    from importlib.metadata import version as _pkg_version
+
+    __version__ = _pkg_version("ragobserve")
+except Exception:
+    __version__ = "unknown"
 
 __all__ = [
     "init", "flush", "get_client", "serve", "trace", "current_trace_id",

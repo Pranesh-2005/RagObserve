@@ -1,6 +1,6 @@
 # RAGObserve — Complete Guide
 
-> v0.5.0
+> v0.6.0
 
 **Local-first observability, debugging, and evaluation for RAG systems. The "MLflow for RAG."**
 
@@ -56,6 +56,7 @@ RAGObserve captures, per query, the entire RAG pipeline and shows it as a **wate
 - **Auth & rate limiting** — API key auth on all REST/WebSocket endpoints; rate limits per endpoint
 - **Health endpoint** — `GET /health` for load balancer / readiness probes (no auth)
 - **Export** — NDJSON export per project (`ragobserve export`) for offline analysis
+- **Auto-updating model prices** — `ragobserve prices --refresh` pulls ~3,100 chat models across ~80 providers, so cost estimates don't rot between releases
 
 It is **framework-agnostic, provider-agnostic, and vector-DB-agnostic**.
 
@@ -548,8 +549,49 @@ ragobserve.log_generation(model="gpt-4o", input_tokens=812, output_tokens=197)  
 ```
 
 - Pass `cost=` to override the estimate.
-- Unknown model → `cost=None` (no guessing). Add it to the `PRICE_BOOK` dict — it already includes Anthropic, OpenAI, Gemini, Groq/Llama, Mixtral, Mistral, DeepSeek, and local/ollama (=0).
+- Unknown model → `cost=None` (no guessing, so the dashboard shows a blank rather than a wrong number).
 - The dashboard's **Generations & cost** view shows per-model and per-day token & dollar breakdowns.
+
+### Keeping prices current
+
+Vendors reprice constantly, so the price book is refreshable rather than release-locked. `ragobserve prices --refresh` downloads the community-maintained [LiteLLM feed](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json) — ~3,100 chat models across ~80 providers — and caches it to `~/.ragobserve/prices.json`.
+
+```bash
+ragobserve prices --refresh              # download latest
+ragobserve prices                        # show feed status + model counts
+ragobserve prices --model gpt-4o-mini    # look up one rate
+```
+
+Resolution order, highest priority first:
+
+| Layer | Source | Models |
+|---|---|---|
+| 1 | `~/.ragobserve/prices.json` (refreshed feed) | ~3,100 |
+| 2 | `PRICE_BOOK` in `ragobserve/server/pricing.py` | 73 (offline fallback) |
+| 3 | no match → `None` | — |
+
+Every provider comes from the same feed — Anthropic, OpenAI, Google, xAI, Meta, Mistral, DeepSeek, Cohere, Amazon, Alibaba, and the hosted open-weight providers. Nothing is hand-favoured.
+
+Automate it on a schedule:
+
+```bash
+0 3 * * 1 ragobserve prices --refresh                                          # cron, weekly
+schtasks /create /tn ragobserve-prices /tr "ragobserve prices --refresh" /sc weekly   # Windows
+```
+
+Set `RAGOBSERVE_PRICE_FEED` to any URL serving the same schema (`{model: {"mode": "chat", "input_cost_per_token": float, "output_cost_per_token": float}}`) to use negotiated or internal chargeback rates.
+
+From Python:
+
+```python
+from ragobserve.server import pricing
+
+pricing.refresh()                                # download + cache, returns model count
+pricing.estimate_cost("gpt-4o-mini", 1200, 400)  # → 0.00042
+pricing.feed_info()                              # {'count': 3126, 'updated_at': ..., 'path': ...}
+```
+
+Model ids resolve by exact match first, then by **longest** matching key — so `gpt-4o-2024-08-06` resolves to `gpt-4o`, and `gpt-4o-mini` resolves to `gpt-4o-mini` rather than being swallowed by the `gpt-4o` prefix.
 
 ---
 
@@ -559,9 +601,19 @@ ragobserve.log_generation(model="gpt-4o", input_tokens=812, output_tokens=197)  
 ragobserve ui                                           # start dashboard at http://127.0.0.1:5601?key=<key>
 ragobserve export --project my-rag --output out.ndjson  # export traces to NDJSON
 ragobserve eval   --project my-rag --api-key gsk_...    # batch-eval traces with Groq
+ragobserve prices --refresh                             # update the model price book from the all-provider feed
 ragobserve providers                                    # list LLM providers and which have API keys set
 ragobserve version                                      # print version
 ```
+
+`prices` flags:
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--refresh` | off | download the latest feed and cache it to `~/.ragobserve/prices.json` |
+| `--model NAME` | — | print one model's input/output rate; exits `1` if unknown |
+
+With no flags it prints feed status (model count, last update, source) and the built-in fallback size.
 
 Or start the dashboard directly from Python (no terminal needed):
 
@@ -686,7 +738,30 @@ How it works under the hood:
 
 - **LocalClient (SQLite):** when called inside a running asyncio loop, the SQLite write is offloaded to the default thread-pool executor via `loop.run_in_executor` — the event loop is never blocked. In synchronous code (scripts, pytest) the write is inline.
 - **HttpClient:** `log_event` puts to an in-memory queue; a background daemon thread flushes — always non-blocking.
-- `__aexit__` is implemented on `_TraceHandle` so `async with ragobserve.trace(...)` works natively.
+- `__aenter__` / `__aexit__` are implemented on `_TraceHandle` so `async with ragobserve.trace(...)` works natively. (Before 0.6.0 only `__aexit__` existed and this raised `TypeError` — upgrade if you hit that.)
+
+### Measured overhead
+
+Instrumentation sits on your request path, so it is benchmarked rather than assumed. Windows / Python 3.13, 10-chunk retrieval + ~5KB context + one generation:
+
+| Path | Median | p95 |
+|---|---|---|
+| `log_retrieval` (10 chunks) | 1.1 ms | 3.8 ms |
+| `log_context` (~5KB prompt) | 1.4 ms | 4.0 ms |
+| `log_generation` | 0.2 ms | 0.5 ms |
+| **Full 4-span trace, async** | **0.8 ms** | **1.5 ms** |
+| Full 4-span trace, sync | 2.8 ms | 143 ms |
+| Price lookup (server ingest) | 0.8 µs | 0.9 µs |
+| `estimate_tokens` (~5KB, tiktoken) | 0.5 ms | 0.8 ms |
+
+Run it yourself: `python examples/bench_overhead.py`.
+
+Reading the numbers:
+
+- **Async is the fast path.** The write is offloaded to the executor, so the coroutine never blocks. Prefer it in servers.
+- **Sync callers occasionally absorb a WAL checkpoint** — that's the 143 ms p95. Median stays at 2.8 ms. If a sync hot path can't tolerate that tail, use `tracking_uri=` so `log_event` is only a `queue.put`.
+- SQLite runs `journal_mode=WAL` + `synchronous=NORMAL`. Crash-safe against process death; only the last commits are at risk on host power loss — the right trade for observability data. Before 0.6.0 the defaults cost one fsync per event, ~96 ms per `log_*` call.
+- `estimate_tokens` is only called by `log_context`. Without `tiktoken` it's a free `len//4` approximation (±25%).
 
 ---
 
@@ -842,7 +917,8 @@ with ragobserve.trace("query", query=question):
 3. **LlamaIndex has no node-parsing event** → chunking is derived from the ingest embedding batch.
 4. **Most rerankers emit no event** (LlamaIndex `SentenceTransformerRerank`/Cohere/`LLMRerank`; LangChain compressors) → use `instrument_postprocessor` / `instrument_compressor`.
 5. **Token usage is best-effort** — read from the provider's `usage`. If absent → `None` → no cost. Pass `input_tokens`/`output_tokens` (or `cost=`) yourself to be sure.
-6. **Unknown model → no cost.** Add it to `PRICE_BOOK` in `ragobserve/server/pricing.py`.
+6. **Unknown model → no cost.** Run `ragobserve prices --refresh` first — the refreshed feed covers ~3,100 models across ~80 providers. Check with `ragobserve prices --model <name>`. Only add to `PRICE_BOOK` in `ragobserve/server/pricing.py` if the model is private to you.
+6b. **Costs look wrong on a `-mini` / `-nano` model?** Fixed in 0.6.0 — the old lookup matched the first key by substring, so `gpt-4o-mini` resolved to `gpt-4o` and overcharged up to 16x. Upgrade and re-run `ragobserve eval` if you need old traces recosted.
 7. **Scores/source show "—"** → you passed bare strings. Pass dicts/doc objects with `score` and `source` (or `metadata.source`).
 8. **Dashboard is empty** → run `ragobserve ui` from the same directory as your app (so it finds `./.ragobserve/ragobserve.db`), or pass `--backend-store-uri`. In HTTP mode, make sure the server is running and `tracking_uri` points to it.
 9. **Tables not found (Postgres)** → this should never happen — `PostgresStore` creates them on connect. If it does, check that the DB user has `CREATE TABLE` privileges on the target schema.
@@ -948,7 +1024,7 @@ Exceeding returns `HTTP 429`.
 ### Health endpoint (no auth)
 
 ```
-GET /health  →  {"status": "ok", "version": "0.5.0"}
+GET /health  →  {"status": "ok", "version": "0.6.0"}
 ```
 
 No API key required. Use for load balancer health checks and Kubernetes readiness probes.

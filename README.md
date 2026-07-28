@@ -1,6 +1,6 @@
 # RAGObserve
 
-> v0.5.0
+> v0.6.0
 
 **Local-first observability, debugging and evaluation for RAG systems. The MLflow for RAG.**
 
@@ -44,12 +44,35 @@ with ragobserve.trace("query", query=question):
 
 Async pipelines work identically — `async with ragobserve.trace(...)` and all `log_*` functions are safe to call from async code without blocking the event loop.
 
+### Overhead
+
+Instrumentation sits on your request path, so it is benchmarked. Measured on Windows / Python 3.13 with a 10-chunk retrieval, a ~5KB assembled context and one generation:
+
+| Path | Median | p95 |
+|---|---|---|
+| `log_retrieval` (10 chunks) | 1.1 ms | 3.8 ms |
+| `log_context` (~5KB prompt) | 1.4 ms | 4.0 ms |
+| `log_generation` | 0.2 ms | 0.5 ms |
+| **Full 4-span trace, async** | **0.8 ms** | **1.5 ms** |
+| Full 4-span trace, sync | 2.8 ms | 143 ms |
+
+Against a RAG query that spends 100–2000 ms in retrieval and generation, that is well under 1% for the async path.
+
+Notes on the numbers:
+- **Async is the fast path.** In a running event loop the SQLite write is offloaded to the default executor, so your coroutine is never blocked. Sync callers write inline and occasionally absorb a WAL checkpoint — that is the 143 ms p95 above.
+- **`tracking_uri=` is faster still.** `HttpClient` only does a `queue.put`; a background thread batches and POSTs.
+- SQLite runs in WAL mode with `synchronous=NORMAL`. Crash-safe against process death; only the last few events are at risk on host power loss.
+- `log_context` calls `estimate_tokens`, which costs ~0.5 ms per 5KB when `tiktoken` is installed and is free otherwise (`len//4` fallback).
+
+Reproduce with `python examples/bench_overhead.py`.
+
 Then explore:
 
 ```bash
 ragobserve ui          # http://127.0.0.1:5601?key=<key>
 ragobserve export --project my-rag --output traces.ndjson
 ragobserve eval   --project my-rag --api-key gsk_...
+ragobserve prices --refresh
 ragobserve providers
 ragobserve version
 ```
@@ -215,6 +238,40 @@ Requires `GROQ_API_KEY` env var (or pass `api_key=` explicitly). Uses `llama3-8b
 ragobserve eval --project my-rag --api-key gsk_...
 ```
 
+## Model pricing (auto-updating)
+
+Generations logged without an explicit `cost=` are backfilled from a price book, so the cost dashboards work either way. Vendors reprice often, so the book refreshes itself from a community-maintained, **all-provider** feed rather than waiting on a RAGObserve release.
+
+```bash
+ragobserve prices --refresh              # ~3,100 chat models, ~80 providers
+ragobserve prices                        # feed status
+ragobserve prices --model gpt-4o-mini    # → $0.15 in / $0.6 out per 1M tokens
+```
+
+The refreshed feed is cached at `~/.ragobserve/prices.json` and takes priority over the built-in book (73 models, offline fallback). Anthropic, OpenAI, Google, xAI, Meta, Mistral, DeepSeek, Cohere, Amazon, Alibaba and the hosted open-weight providers all come from the same source — nothing is hand-favoured.
+
+Keep it current on a schedule:
+
+```bash
+# cron — refresh weekly
+0 3 * * 1 ragobserve prices --refresh
+
+# Windows Task Scheduler
+schtasks /create /tn ragobserve-prices /tr "ragobserve prices --refresh" /sc weekly
+```
+
+Point `RAGOBSERVE_PRICE_FEED` at any URL serving the same schema to use your own rates (negotiated pricing, internal chargeback). From Python:
+
+```python
+from ragobserve.server import pricing
+
+pricing.refresh()                                   # download + cache
+pricing.estimate_cost("gpt-4o-mini", 1200, 400)     # → 0.00042
+pricing.feed_info()                                 # {'count': 3126, 'updated_at': ...}
+```
+
+Unknown models return `None` rather than a guessed cost, so the dashboard shows a blank instead of a wrong number.
+
 ## LLM generation & live replay
 
 RAGObserve ships a zero-SDK, httpx-based provider layer covering **11 providers** — Anthropic, OpenAI, Gemini, Groq, OpenRouter, Together, Mistral, DeepSeek, Fireworks, Perplexity, Ollama. From any trace's **Generation** / **Context** view you can *replay* the captured context against a live provider (when its API key is set) and the new generation is logged back into the trace with its cost.
@@ -293,7 +350,7 @@ ragobserve export --project my-rag \
 ## Health endpoint
 
 ```
-GET /health  →  {"status": "ok", "version": "0.4.0"}
+GET /health  →  {"status": "ok", "version": "0.6.0"}
 ```
 
 No auth required — use for load balancer health checks and container readiness probes.
