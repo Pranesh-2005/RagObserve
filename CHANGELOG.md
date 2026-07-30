@@ -1,5 +1,37 @@
 # Changelog
 
+## [0.7.0] — 2026-07-30
+
+### Added
+- **Multimodal retrieval renders in the dashboard.** Image results used to show a
+  blank Text cell — the row had a score and a source but nothing to look at, so a
+  CLIP leg was indistinguishable from a scoring bug. Tag a result and the
+  Retrieval Explorer, Hybrid Search Explorer and Reranker Analytics all show the
+  thumbnail:
+  ```python
+  ragobserve.log_retrieval(query, [
+      {"id": "img:7", "text": "", "score": 0.34, "source": "deck.pdf p.4",
+       "metadata": {"modality": "image", "path": "/data/images/7.png"}},
+  ], retriever="clip-ViT-B-32")
+  ```
+  `metadata.path` is served by the new `GET /api/image`; `metadata.image_b64`
+  (plus optional `metadata.mime`) inlines the bytes instead, for remote stores.
+  Untagged results render exactly as before.
+- `GET /api/image?trace_id=&path=` — serves an image **only** if that trace logged
+  that path, and only for known image extensions. The trace's own logged paths are
+  the entire allowlist: without that check the endpoint would be an arbitrary
+  local-file read for anyone who can reach the dashboard. Thumbnails are fetched
+  with the `Authorization` header rather than a `?key=` URL, so the API key stays
+  out of browser history, referrers and access logs.
+
+### Notes
+- Ranking metrics (Precision/Recall@k, MRR, nDCG, `chunk_utilization`) key off
+  result `id`, so they already work across modalities — give image results stable
+  ids distinct from your chunk ids.
+- Vision **cost** is still text-only: `log_generation` takes `input_tokens`, and
+  the price book has no per-image or per-tile rate. An image-heavy call
+  underreports. Pass a corrected `cost=` if you need it exact.
+
 ## [0.6.0] — 2026-07-28
 
 ### Fixed

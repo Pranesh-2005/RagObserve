@@ -1,6 +1,6 @@
 # RAGObserve
 
-> v0.6.0
+> v0.7.0
 
 **Local-first observability, debugging and evaluation for RAG systems. The MLflow for RAG.**
 
@@ -171,6 +171,34 @@ ragobserve.init(project="prod", store=MyStore())
 - **Chunk Explorer** — most retrieved / never retrieved (dead) / duplicate chunks
 - **Metrics** — Precision@k, Recall@k, MRR, nDCG over logged ground truth, plus chunk utilization
 - **Generations & cost** — Langfuse-style cost tracing: per-model / per-day token & $ breakdowns, charts, and the context that produced each generation. Costs are auto-backfilled from a built-in price book when you don't pass `cost=`.
+
+## Multimodal RAG
+
+Log an image retriever like any other. Tag the result and the thumbnail renders in
+the Retrieval Explorer, Hybrid Search Explorer and Reranker Analytics — an image hit
+otherwise shows a score with an empty Text cell.
+
+```python
+ragobserve.log_retrieval(query, [
+    {"id": "img:7", "text": "", "score": 0.34, "source": "deck.pdf p.4",
+     "metadata": {"modality": "image", "path": "/data/images/7.png"}},
+], retriever="clip-ViT-B-32")
+```
+
+- `metadata.modality: "image"` is what switches on the thumbnail.
+- `metadata.path` — a local file, served by `GET /api/image`. The dashboard serves a
+  path **only** if the trace being viewed logged it; anything else is refused, so
+  the endpoint can't be turned into an arbitrary local-file read.
+- `metadata.image_b64` (+ optional `metadata.mime`) — inline the bytes instead, when
+  the images don't live on the dashboard's filesystem.
+
+Log your text and image legs as two `log_retrieval` calls with different `retriever=`
+names and the Hybrid Search Explorer puts them side by side. Ranking metrics work
+unchanged as long as image ids don't collide with chunk ids.
+
+Vision **cost** is text-only for now — `log_generation` counts `input_tokens`, and the
+price book has no per-image rate, so an image-heavy call underreports. Pass `cost=`
+yourself if you need it exact.
 
 ## Docker
 
@@ -350,7 +378,7 @@ ragobserve export --project my-rag \
 ## Health endpoint
 
 ```
-GET /health  →  {"status": "ok", "version": "0.6.0"}
+GET /health  →  {"status": "ok", "version": "0.7.0"}
 ```
 
 No auth required — use for load balancer health checks and container readiness probes.

@@ -1,6 +1,6 @@
 # RAGObserve — Complete Guide
 
-> v0.6.0
+> v0.7.0
 
 **Local-first observability, debugging, and evaluation for RAG systems. The "MLflow for RAG."**
 
@@ -19,6 +19,7 @@ RAGObserve records the whole retrieval lifecycle into a single local SQLite file
 5. [Storage backends — do I need to create tables?](#5-storage-backends--do-i-need-to-create-tables)
 6. [Two ways to instrument — pick ONE per pipeline](#6-two-ways-to-instrument--pick-one-per-pipeline)
 7. [Way A — Manual SDK (works with any framework)](#7-way-a--manual-sdk-works-with-any-framework)
+   - [Multimodal results (images)](#multimodal-results-images)
 8. [Logger reference (every `log_*` function)](#8-logger-reference-every-log_-function)
 9. [Way B — Framework adapters (auto-capture)](#9-way-b--framework-adapters-auto-capture)
    - [LangChain](#91-langchain)
@@ -323,6 +324,48 @@ results = [
 ]
 ragobserve.log_retrieval(question, results, retriever="qdrant")
 ```
+
+### Multimodal results (images)
+
+An image hit has no text, so by default it renders as a score next to an empty cell —
+which looks like a bug rather than a result. Tag it and the dashboard shows the
+picture instead, in the Retrieval Explorer, Hybrid Search Explorer and Reranker
+Analytics alike:
+
+```python
+ragobserve.log_retrieval(query, [
+    {"id": "img:7", "text": "", "score": 0.34, "source": "deck.pdf p.4",
+     "metadata": {"modality": "image", "path": "/data/images/7.png"}},
+], retriever="clip-ViT-B-32", modality="image")
+```
+
+| metadata key | Effect |
+|---|---|
+| `modality: "image"` | **Required** — switches on thumbnail rendering. Without it nothing changes. |
+| `path` | Local file, fetched from `GET /api/image`. Must be readable by the *server* process. |
+| `image_b64` | Inline bytes instead of a path — use when images don't live on the dashboard's filesystem. |
+| `mime` | Content type for `image_b64` (default `image/png`). |
+| `label` | Caption shown under the thumbnail when `text` is empty. |
+
+Log the text and image legs as **two `log_retrieval` calls** with different
+`retriever=` names — the Hybrid Search Explorer then shows them side by side, the same
+way it does BM25 vs vector. Log the empty case too, otherwise "no images matched" and
+"the image search never ran" look identical in the waterfall.
+
+Ranking metrics (Precision/Recall@k, MRR, nDCG, chunk utilization) key off result
+`id`, so they work across modalities unchanged — but image ids and chunk ids are often
+both database rowids, and a bare `"7"` from each table will collide. Prefix them
+(`img:7`).
+
+**Security.** `GET /api/image` serves a path only if the trace you're viewing logged
+that exact path, and only for known image extensions. That allowlist is the whole
+guard: without it, a dashboard reachable on the network would be an arbitrary
+local-file read. Thumbnails are fetched with the `Authorization` header rather than a
+`?key=` URL, so the API key never lands in browser history, referrers or access logs.
+
+**Cost is text-only.** `log_generation` counts `input_tokens`; the price book has no
+per-image or per-tile rate, so a vision call with several images underreports. Pass an
+explicit `cost=` if you need it exact.
 
 ---
 
@@ -738,7 +781,7 @@ How it works under the hood:
 
 - **LocalClient (SQLite):** when called inside a running asyncio loop, the SQLite write is offloaded to the default thread-pool executor via `loop.run_in_executor` — the event loop is never blocked. In synchronous code (scripts, pytest) the write is inline.
 - **HttpClient:** `log_event` puts to an in-memory queue; a background daemon thread flushes — always non-blocking.
-- `__aenter__` / `__aexit__` are implemented on `_TraceHandle` so `async with ragobserve.trace(...)` works natively. (Before 0.6.0 only `__aexit__` existed and this raised `TypeError` — upgrade if you hit that.)
+- `__aenter__` / `__aexit__` are implemented on `_TraceHandle` so `async with ragobserve.trace(...)` works natively. (Before 0.7.0 only `__aexit__` existed and this raised `TypeError` — upgrade if you hit that.)
 
 ### Measured overhead
 
@@ -760,7 +803,7 @@ Reading the numbers:
 
 - **Async is the fast path.** The write is offloaded to the executor, so the coroutine never blocks. Prefer it in servers.
 - **Sync callers occasionally absorb a WAL checkpoint** — that's the 143 ms p95. Median stays at 2.8 ms. If a sync hot path can't tolerate that tail, use `tracking_uri=` so `log_event` is only a `queue.put`.
-- SQLite runs `journal_mode=WAL` + `synchronous=NORMAL`. Crash-safe against process death; only the last commits are at risk on host power loss — the right trade for observability data. Before 0.6.0 the defaults cost one fsync per event, ~96 ms per `log_*` call.
+- SQLite runs `journal_mode=WAL` + `synchronous=NORMAL`. Crash-safe against process death; only the last commits are at risk on host power loss — the right trade for observability data. Before 0.7.0 the defaults cost one fsync per event, ~96 ms per `log_*` call.
 - `estimate_tokens` is only called by `log_context`. Without `tiktoken` it's a free `len//4` approximation (±25%).
 
 ---
@@ -918,7 +961,8 @@ with ragobserve.trace("query", query=question):
 4. **Most rerankers emit no event** (LlamaIndex `SentenceTransformerRerank`/Cohere/`LLMRerank`; LangChain compressors) → use `instrument_postprocessor` / `instrument_compressor`.
 5. **Token usage is best-effort** — read from the provider's `usage`. If absent → `None` → no cost. Pass `input_tokens`/`output_tokens` (or `cost=`) yourself to be sure.
 6. **Unknown model → no cost.** Run `ragobserve prices --refresh` first — the refreshed feed covers ~3,100 models across ~80 providers. Check with `ragobserve prices --model <name>`. Only add to `PRICE_BOOK` in `ragobserve/server/pricing.py` if the model is private to you.
-6b. **Costs look wrong on a `-mini` / `-nano` model?** Fixed in 0.6.0 — the old lookup matched the first key by substring, so `gpt-4o-mini` resolved to `gpt-4o` and overcharged up to 16x. Upgrade and re-run `ragobserve eval` if you need old traces recosted.
+6b. **Costs look wrong on a `-mini` / `-nano` model?** Fixed in 0.7.0 — the old lookup matched the first key by substring, so `gpt-4o-mini` resolved to `gpt-4o` and overcharged up to 16x. Upgrade and re-run `ragobserve eval` if you need old traces recosted.
+6c. **Image results show a score but a blank Text cell** → add `metadata: {"modality": "image", "path": ...}`. See [Multimodal results](#multimodal-results-images). If the thumbnail says `[image unavailable]`, the *server* process can't read that path (common when the dashboard runs in Docker and the images don't) — use `metadata.image_b64` instead.
 7. **Scores/source show "—"** → you passed bare strings. Pass dicts/doc objects with `score` and `source` (or `metadata.source`).
 8. **Dashboard is empty** → run `ragobserve ui` from the same directory as your app (so it finds `./.ragobserve/ragobserve.db`), or pass `--backend-store-uri`. In HTTP mode, make sure the server is running and `tracking_uri` points to it.
 9. **Tables not found (Postgres)** → this should never happen — `PostgresStore` creates them on connect. If it does, check that the DB user has `CREATE TABLE` privileges on the target schema.
@@ -1024,7 +1068,7 @@ Exceeding returns `HTTP 429`.
 ### Health endpoint (no auth)
 
 ```
-GET /health  →  {"status": "ok", "version": "0.6.0"}
+GET /health  →  {"status": "ok", "version": "0.7.0"}
 ```
 
 No API key required. Use for load balancer health checks and Kubernetes readiness probes.

@@ -11,6 +11,39 @@
 const TRACE_ID = {{ trace_id | tojson }};
 let DATA = null;
 
+/* Image results carry no text, so the Text column renders empty and the row looks
+   like a scoring bug. Show the picture the retriever actually matched instead. */
+function contentCell(r) {
+  const m = r.metadata || {};
+  const text = esc(truncate(r.text, 180));
+  if (m.modality !== "image") return text;
+  const caption = text || `<span class="muted small">${esc(m.label || "image")}</span>`;
+  if (m.image_b64) {
+    return `<img class="thumb" src="data:${esc(m.mime || "image/png")};base64,${esc(m.image_b64)}"
+                 alt="${esc(r.source || "")}">${caption}`;
+  }
+  if (m.path) {
+    // fetched with the Authorization header rather than a ?key= URL, so the API
+    // key never lands in browser history, referrers or server access logs
+    const url = `/api/image?trace_id=${encodeURIComponent(TRACE_ID)}&path=${encodeURIComponent(m.path)}`;
+    return `<img class="thumb" data-src="${esc(url)}" alt="${esc(r.source || "")}">${caption}`;
+  }
+  return caption;
+}
+
+async function loadThumb(img) {
+  const url = img.dataset.src;
+  delete img.dataset.src;
+  try {
+    const key = getApiKey();
+    const r = await fetch(url, { headers: key ? { "Authorization": `Bearer ${key}` } : {} });
+    if (!r.ok) throw new Error(String(r.status));
+    img.src = URL.createObjectURL(await r.blob());
+  } catch (e) {
+    img.outerHTML = `<span class="muted small">[image unavailable]</span>`;
+  }
+}
+
 function resultsTable(results, extraCols) {
   if (!results || !results.length) return `<p class="muted">none</p>`;
   return `<table class="data"><thead><tr>
@@ -20,7 +53,7 @@ function resultsTable(results, extraCols) {
       <td>${r.rank ?? i + 1}</td>
       <td class="mono">${fmtNum(r.score)}</td>
       <td class="mono">${esc(r.source || (r.metadata && r.metadata.source) || "—")}</td>
-      <td>${esc(truncate(r.text, 180))}</td>
+      <td>${contentCell(r)}</td>
       ${extraCols ? extraCols.cell(r, i) : ""}
     </tr>`).join("")}</tbody></table>`;
 }
@@ -179,6 +212,7 @@ function showEvent(ev, row) {
   };
   panel.innerHTML = (renderers[ev.stage] || (() => renderGeneric(ev)))(a) || renderGeneric(ev);
   panel.style.display = "block";
+  panel.querySelectorAll("img.thumb[data-src]").forEach(loadThumb);
   initReplay();
 }
 

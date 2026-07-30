@@ -167,3 +167,9 @@ pre.block {
   border-radius: 8px; padding: 12px; margin-top: 8px; font-size: 13px; }
 .tok-pill { display: inline-block; padding: 1px 7px; border-radius: 999px; background: var(--panel2);
   font-family: var(--mono); font-size: 11px; color: var(--muted); }
+
+/* Image results in the retrieval / fusion / rerank tables. */
+img.thumb {
+  display: block; max-width: 160px; max-height: 120px; margin-bottom: 6px;
+  border: 1px solid var(--border); border-radius: 6px; background: var(--panel2);
+}
