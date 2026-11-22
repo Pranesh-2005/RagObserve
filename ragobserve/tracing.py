@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import contextvars
 import functools
+import inspect
 import time
 from typing import Any, Dict, List, Optional
 
@@ -69,6 +70,16 @@ class _TraceHandle:
 
     # -- decorator --------------------------------------------------------
     def __call__(self, fn):
+        # A sync wrapper around a coroutine function would close the span when the
+        # coroutine is *created*, before any of its work runs.
+        if inspect.iscoroutinefunction(fn):
+            @functools.wraps(fn)
+            async def awrapper(*args, **kwargs):
+                async with _TraceHandle(self._name or fn.__name__, self._stage, dict(self._attributes)):
+                    return await fn(*args, **kwargs)
+
+            return awrapper
+
         @functools.wraps(fn)
         def wrapper(*args, **kwargs):
             with _TraceHandle(self._name or fn.__name__, self._stage, dict(self._attributes)):
