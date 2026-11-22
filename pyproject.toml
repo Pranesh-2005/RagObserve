@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ragobserve"
-version = "0.7.0"
+version = "0.8.0"
 description = "RAGObserve: local-first observability, debugging and evaluation for RAG systems. The MLflow for RAG."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -37,6 +37,8 @@ llm = ["anthropic>=0.40", "openai>=1.0"]
 postgres = ["psycopg2-binary>=2.9"]
 files    = ["fsspec>=2023.1"]          # add s3fs / gcsfs / adlfs / gdrivefs for cloud targets
 tiktoken = ["tiktoken>=0.5"]
+ragas    = ["ragas>=0.2"]                # ragobserve.ragas eval backend (export works without it)
+otel     = ["opentelemetry-proto>=1.20"]   # protobuf OTLP at /v1/traces (JSON works without it)
 dev = ["pytest>=7.0", "moto[s3]>=5.0", "s3fs>=2023.1", "psycopg2-binary>=2.9", "tiktoken>=0.5"]
 
 [project.scripts]

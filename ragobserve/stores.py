@@ -202,6 +202,13 @@ CREATE TABLE IF NOT EXISTS eval_scores (
     PRIMARY KEY (trace_id, metric)
 );
 """),
+    # see server/db.py migration 2: re-sent events duplicated chunk_retrievals rows
+    (2, """
+DELETE FROM chunk_retrievals WHERE id NOT IN (
+    SELECT MIN(id) FROM chunk_retrievals GROUP BY event_id, content_hash
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_cr_event_chunk ON chunk_retrievals(event_id, content_hash);
+"""),
 ]
 
 _PG_SCHEMA = """
@@ -357,12 +364,8 @@ class PostgresStore:
         trace_id = ev.get("trace_id") or ev.get("event_id")
         attrs = dict(ev.get("attributes") or {})
 
-        if ev.get("stage") == "generation" and attrs.get("cost") in (None, 0):
-            est = pricing.estimate_cost(attrs.get("model"), attrs.get("input_tokens"),
-                                        attrs.get("output_tokens"))
-            if est is not None:
-                attrs["cost"] = est
-                attrs["cost_estimated"] = True
+        if ev.get("stage") == "generation":
+            attrs = pricing.backfill_generation(attrs)
 
         cur.execute(
             "INSERT INTO projects(name, created_at) VALUES (%s, %s) ON CONFLICT DO NOTHING",
@@ -388,7 +391,10 @@ class PostgresStore:
         else:
             new_start = min(row["start_time"] or start, start)
             new_end = max(row["end_time"] or end, end)
-            new_query = row["query"] or query
+            # the root span holds the user's question; a child's query may be a
+            # rewrite, and the root is usually written last (it closes last)
+            is_root = not ev.get("parent_span_id")
+            new_query = (query if (is_root and query) else None) or row["query"] or query
             status = "error" if (row["status"] == "error" or ev.get("status") == "error") else "ok"
             cur.execute(
                 "UPDATE traces SET start_time=%s, end_time=%s, query=%s, status=%s WHERE trace_id=%s",
@@ -445,7 +451,7 @@ class PostgresStore:
                 if chash:
                     cur.execute(
                         "INSERT INTO chunk_retrievals(event_id, trace_id, project, content_hash, score, rank)"
-                        " VALUES (%s,%s,%s,%s,%s,%s)",
+                        " VALUES (%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING",
                         (event_id, trace_id, project, chash,
                          item.get("score"), item.get("rank", i + 1)),
                     )

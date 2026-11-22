@@ -155,7 +155,7 @@ Answer:
         context_window=8192,
     )
 
-    model = "llama-3.1-8b-instant"
+    model = "openai/gpt-oss-20b"
     t0 = time.time()
     response = client.chat.completions.create(
         model=model,

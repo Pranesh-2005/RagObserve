@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Compare runs</h1>
+<p class="muted">Two projects side by side, e.g. two <span class="mono">ragobserve test</span> golden runs, or before/after a chunking change.</p>
+<div class="toolbar">
+  <label class="muted small">A</label><select id="a"></select>
+  <label class="muted small">B</label><select id="b"></select>
+  <label class="muted small">k</label><input type="text" id="k" value="10" size="3">
+</div>
+<div id="out"><div class="empty">Loading…</div></div>
+{% endblock %}
+{% block scripts %}
+<script>
+// [label, getter, format, higherIsBetter]
+const ROWS = [
+  ["Traces", r => r.traces, v => v ?? "—", null],
+  ["Recall@k", r => r.retrieval.recall_at_k, fmtPct, true],
+  ["Precision@k", r => r.retrieval.precision_at_k, fmtPct, true],
+  ["MRR", r => r.retrieval.mrr, v => fmtNum(v), true],
+  ["nDCG@k", r => r.retrieval.ndcg, v => fmtNum(v), true],
+  ["Faithfulness", r => r.faithfulness, v => fmtNum(v, 2), true],
+  ["Answer relevance", r => r.answer_relevance, v => fmtNum(v, 2), true],
+  ["Latency p50", r => r.latency_p50_ms, fmtMs, false],
+  ["Latency p95", r => r.latency_p95_ms, fmtMs, false],
+  ["Avg cost / trace", r => r.avg_cost, fmtCost, false],
+  ["Error rate", r => r.error_rate, fmtPct, false],
+];
+
+function delta(a, b, higher) {
+  if (a == null || b == null || higher === null || a === b) return `<td class="muted">·</td>`;
+  const better = higher ? b > a : b < a;
+  const pct = a !== 0 ? ` (${((b - a) / Math.abs(a) * 100).toFixed(1)}%)` : "";
+  return `<td class="${better ? "shift-up" : "shift-down"}">${b > a ? "▲" : "▼"}${pct}</td>`;
+}
+
+async function load() {
+  const a = document.getElementById("a").value, b = document.getElementById("b").value;
+  const k = parseInt(document.getElementById("k").value) || 10;
+  const out = document.getElementById("out");
+  if (!a || !b) { out.innerHTML = `<div class="empty">Need two projects.</div>`; return; }
+  const u = new URL(location.href);
+  u.searchParams.set("a", a); u.searchParams.set("b", b);
+  history.replaceState(null, "", u);
+  const d = await api(`/api/compare?a=${encodeURIComponent(a)}&b=${encodeURIComponent(b)}&k=${k}`);
+  const verdicts = [...new Set([...Object.keys(d.a.triage), ...Object.keys(d.b.triage)])].sort();
+  out.innerHTML = `<table class="data"><thead><tr>
+      <th>Metric</th><th class="mono">${esc(a)}</th><th class="mono">${esc(b)}</th><th>B vs A</th>
+    </tr></thead><tbody>
+    ${ROWS.map(([label, get, fmt, higher]) => `<tr><td>${label.replace("@k", "@" + d.k)}</td>
+      <td>${fmt(get(d.a))}</td><td>${fmt(get(d.b))}</td>${delta(get(d.a), get(d.b), higher)}</tr>`).join("")}
+    </tbody></table>
+    ${verdicts.length ? `<h2>Triage (latest 500 traces each)</h2>
+    <table class="data"><thead><tr><th>Verdict</th><th>${esc(a)}</th><th>${esc(b)}</th></tr></thead><tbody>
+      ${verdicts.map(v => `<tr><td>${triageBadge(v)}</td><td>${d.a.triage[v] || 0}</td><td>${d.b.triage[v] || 0}</td></tr>`).join("")}
+    </tbody></table>` : ""}`;
+}
+
+(async () => {
+  const projects = (await api("/api/projects")).map(p => p.name);
+  const pa = getParam("a", projects[1] || projects[0] || ""), pb = getParam("b", projects[0] || "");
+  for (const [id, cur] of [["a", pa], ["b", pb]]) {
+    const sel = document.getElementById(id);
+    sel.innerHTML = projects.map(p => `<option ${p === cur ? "selected" : ""}>${esc(p)}</option>`).join("");
+    sel.addEventListener("change", load);
+  }
+  document.getElementById("k").addEventListener("change", load);
+  await load();
+})();
+</script>
+{% endblock %}

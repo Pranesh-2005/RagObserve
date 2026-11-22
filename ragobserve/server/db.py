@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sqlite3
 import threading
 import time
@@ -30,6 +31,15 @@ CREATE TABLE IF NOT EXISTS eval_scores (
     evaluated_at REAL,
     PRIMARY KEY (trace_id, metric)
 );
+"""),
+    # Events are upserted, so a re-sent event used to append a second set of
+    # chunk_retrievals rows and inflate chunk stats. Drop existing dupes, then
+    # make (event_id, content_hash) unique.
+    (2, """
+DELETE FROM chunk_retrievals WHERE id NOT IN (
+    SELECT MIN(id) FROM chunk_retrievals GROUP BY event_id, content_hash
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_cr_event_chunk ON chunk_retrievals(event_id, content_hash);
 """),
 ]
 
@@ -130,8 +140,11 @@ class Store:
         # WAL + synchronous=NORMAL keeps crash-safety against process death and only
         # risks the last commits on host power loss, which is the right trade for
         # observability data sitting on an app's hot path.
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute("PRAGMA synchronous=NORMAL")
+        # RAGOBSERVE_BENCH_NO_WAL exists only to reproduce the pre-0.6.0 benchmark
+        # (journal_mode=delete, synchronous=FULL) — not for real use.
+        if not os.environ.get("RAGOBSERVE_BENCH_NO_WAL"):
+            self._conn.execute("PRAGMA journal_mode=WAL")
+            self._conn.execute("PRAGMA synchronous=NORMAL")
         with self._lock:
             self._conn.executescript(SCHEMA)
             self._conn.commit()
@@ -163,11 +176,8 @@ class Store:
         attrs = ev.get("attributes") or {}
         # backfill generation cost from the price book when not supplied, so the
         # cost dashboards work even if the user didn't pass cost= explicitly.
-        if ev.get("stage") == "generation" and attrs.get("cost") in (None, 0):
-            est = pricing.estimate_cost(attrs.get("model"), attrs.get("input_tokens"),
-                                        attrs.get("output_tokens"))
-            if est is not None:
-                attrs = {**attrs, "cost": est, "cost_estimated": True}
+        if ev.get("stage") == "generation":
+            attrs = pricing.backfill_generation(attrs)
         cur.execute(
             "INSERT OR IGNORE INTO projects(name, created_at) VALUES (?, ?)",
             (project, time.time()),
@@ -187,7 +197,10 @@ class Store:
         else:
             new_start = min(row["start_time"] or start, start)
             new_end = max(row["end_time"] or end, end)
-            new_query = row["query"] or query
+            # the root span holds the user's question; a child's query may be a
+            # rewrite, and the root is usually written last (it closes last)
+            is_root = not ev.get("parent_span_id")
+            new_query = (query if (is_root and query) else None) or row["query"] or query
             status = "error" if (row["status"] == "error" or ev.get("status") == "error") else "ok"
             cur.execute(
                 "UPDATE traces SET start_time=?, end_time=?, query=?, status=? WHERE trace_id=?",
@@ -246,7 +259,7 @@ class Store:
                 chash = register(item)
                 if chash:
                     cur.execute(
-                        "INSERT INTO chunk_retrievals(event_id, trace_id, project, content_hash, score, rank)"
+                        "INSERT OR IGNORE INTO chunk_retrievals(event_id, trace_id, project, content_hash, score, rank)"
                         " VALUES (?,?,?,?,?,?)",
                         (event_id, trace_id, project, chash, item.get("score"), item.get("rank", i + 1)),
                     )

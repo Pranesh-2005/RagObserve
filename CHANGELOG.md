@@ -1,5 +1,78 @@
 # Changelog
 
+## [0.8.0] — 2026-11-22
+
+### Added
+- **Ragas integration** (`ragobserve.ragas`). `ragobserve export --format ragas`
+  writes one Ragas sample per trace (`user_input`, `retrieved_contexts`,
+  `response`, `retrieved_context_ids`, plus `reference_context_ids` /
+  `reference` when logged). `ragobserve eval --backend ragas` and
+  `POST /api/eval/{id}?backend=ragas` score traces with Ragas and store the
+  results in the existing faithfulness / relevance columns. The
+  `ragobserve[ragas]` extra is only needed for scoring.
+- The LLM judge runs on any replay provider: `--provider` / `?provider=` /
+  `provider=`.
+- **OpenTelemetry ingest** at `POST /v1/traces` (OTLP/HTTP). It maps OpenInference,
+  OpenLLMetry and GenAI-semconv spans to retrieval / rerank / generation /
+  embedding events. JSON works out of the box; protobuf needs the
+  `ragobserve[otel]` extra.
+- **`ragobserve test`**: golden-set regression for CI. It runs a JSONL question
+  set through `--pipeline module:fn`, writes a project per run, and exits 1 when
+  any `--min-*` threshold (recall, precision, MRR, nDCG, faithfulness, answer
+  relevance) isn't met. A threshold with no data counts as a failure.
+- **Failure triage**: `GET /api/triage`, a Metrics-page section and a badge on
+  every trace naming the first stage that broke.
+- **Compare page** and `GET /api/compare?a=&b=`: two projects side by side, with
+  deltas coloured better or worse.
+- **Evaluation panel** on the trace page: shows stored scores and has a "Score this
+  trace" button (LLM judge on any provider, or Ragas).
+- **`ragobserve import-ragas`**: attaches scores from a Ragas results CSV/JSONL to
+  traces, matched by `trace_id` (now included in `export --format ragas`) or by
+  query.
+- **Vision cost**: `log_generation(images=[{width, height}])` adds image tokens
+  using Claude / Gemini / OpenAI sizing rules. SQLite and Postgres now share one
+  cost-backfill function.
+- **Replay keeps images**: the trace's image context is sent to OpenAI-compatible
+  providers, Anthropic and Ollama.
+- **`log_grounding`** and a Grounding panel (per-claim supported / unsupported,
+  with evidence ids). A Chunking panel replaces the raw JSON view (so image
+  chunks render too).
+
+### Fixed
+- **`@ragobserve.trace` on an `async def` logged a ~0 ms span.** The wrapper was
+  sync, so the span closed when the coroutine was created, before any awaited
+  work. Coroutine functions now get an async wrapper.
+- **`ragobserve ui --backend-store-uri postgresql://...` opened SQLite.** `ui`
+  now routes DSNs to `PostgresStore`, like `export` and `eval` do.
+- **Re-sent events inflated chunk stats.** `chunk_retrievals` had no unique key,
+  so a retried event added duplicate rows. Migration 2 (SQLite and Postgres)
+  removes existing duplicates and adds a unique `(event_id, content_hash)` index.
+- **The default eval model (`llama3-8b-8192`) is retired on Groq.** The judge now
+  routes through the provider registry and uses the provider's default model.
+  Groq has since retired every Llama chat model, so the Groq default is now
+  `openai/gpt-oss-20b`, and `examples/test_rag.py`, `test_langchain.py` and
+  `test_llamaindex.py`, which 404'd, use it too.
+- **The judge's answer was cut off on reasoning models.** `max_tokens` went from
+  150 to 1024; a trivial JSON reply already used 121 tokens on `gpt-oss-20b`.
+
+### Fixed (found by running `examples/test_rag.py` end to end)
+- **`ragobserve test` reported "no data" for retrieval when the LLM call failed.**
+  Ground truth was logged after the pipeline returned. It's now logged first.
+- **Triage said `retrieval_miss` on traces with recall 1.0.** The app logs int ids
+  on retrieval and none on rerank/context. Triage now matches on id or text hash,
+  and an item that has both links the two.
+- **The trace query showed an inner span's rewritten query** instead of the
+  user's question. The root span's query now wins.
+- **`import-ragas` overwrote valid scores with `None`** when Ragas returned NaN
+  for a metric. Empty and NaN cells are skipped now.
+- **Replay generation always returned 401 from the dashboard.** The button's
+  `fetch` sent no `Authorization` header. It now goes through a shared `apiPost`.
+- **`ragobserve ui` crashed on Windows when its output was piped or redirected.**
+  cp1252 can't encode the `→` it prints. stdout now replaces characters it
+  can't encode.
+- The S3 integration tests skip instead of failing when the bucket can't be
+  reached with the current AWS credentials.
+
 ## [0.7.0] — 2026-07-30
 
 ### Added

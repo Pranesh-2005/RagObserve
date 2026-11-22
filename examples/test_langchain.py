@@ -50,7 +50,7 @@ reranker = HuggingFaceCrossEncoder(
 )
 
 llm = ChatGroq(
-    model="llama-3.1-8b-instant",
+    model="openai/gpt-oss-20b",
     api_key=os.getenv("GROQ_API_KEY")
 )
 
@@ -117,7 +117,7 @@ Answer:
         response = llm.invoke(prompt)
         usage = getattr(response, "usage_metadata", None) or {}
         ragobserve.log_generation(
-            model="llama-3.1-8b-instant", prompt=prompt, response=response.content,
+            model="openai/gpt-oss-20b", prompt=prompt, response=response.content,
             input_tokens=usage.get("input_tokens"),
             output_tokens=usage.get("output_tokens"),
             duration_ms=(time.time() - t0) * 1000.0, provider="groq",

@@ -53,11 +53,28 @@ except ImportError:
 
 _s3_bucket = os.environ.get("S3_BUCKET", "")
 
+
+def _s3_reachable() -> bool:
+    """S3_BUCKET in .env isn't enough: expired/missing credentials made these
+    tests fail with PermissionError instead of skipping. Probe once, fast."""
+    if not (_has_s3fs and _s3_bucket):
+        return False
+    try:
+        import boto3
+        from botocore.config import Config
+
+        cfg = Config(connect_timeout=3, read_timeout=3, retries={"max_attempts": 1})
+        boto3.client("s3", config=cfg).head_bucket(Bucket=_s3_bucket)
+        return True
+    except Exception:
+        return False
+
+
 requires_pg     = pytest.mark.skipif(not _has_pg,     reason="Postgres .env vars not set")
 requires_fsspec = pytest.mark.skipif(not _has_fsspec, reason="fsspec not installed")
 requires_s3     = pytest.mark.skipif(
-    not (_has_s3fs and _s3_bucket),
-    reason="s3fs not installed or S3_BUCKET not set",
+    not _s3_reachable(),
+    reason="s3fs missing, S3_BUCKET unset, or bucket not reachable with current AWS credentials",
 )
 
 

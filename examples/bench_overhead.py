@@ -69,6 +69,11 @@ async def bench_async(n: int = 100) -> None:
 
 
 def main() -> None:
+    if os.environ.get("RAGOBSERVE_BENCH_NO_WAL"):
+        print("SQLite: DEFAULT (journal=delete, synchronous=FULL) [RAGOBSERVE_BENCH_NO_WAL set]")
+    else:
+        print("SQLite: WAL + synchronous=NORMAL")
+
     ragobserve.init(project="bench", db_path=os.path.join(tempfile.mkdtemp(), "bench.db"))
 
     print("=== sync (LocalClient writes inline) ===")

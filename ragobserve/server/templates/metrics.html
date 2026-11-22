@@ -10,10 +10,32 @@
 </div>
 <div id="aggregate" class="cards"></div>
 <div id="pertrace"></div>
+<h2>Failure triage</h2>
+<p class="muted small">First stage that broke, per trace. Retrieval verdicts need ground truth; answer verdicts need eval scores or <span class="mono">log_grounding</span>.</p>
+<div id="triageCounts" class="cards"></div>
+<div id="triageRows"></div>
 {% endblock %}
 {% block scripts %}
 <script>
+async function loadTriage(project) {
+  const counts = document.getElementById("triageCounts"), rows = document.getElementById("triageRows");
+  if (!project) { counts.innerHTML = rows.innerHTML = ""; return; }
+  const t = await api(`/api/triage?project=${encodeURIComponent(project)}`);
+  const order = Object.entries(t.counts).sort((a, b) => b[1] - a[1]);
+  counts.innerHTML = order.map(([v, n]) =>
+    `<div class="card"><div class="muted small">${triageBadge(v)}</div><div class="big">${n}</div></div>`).join("")
+    || `<div class="empty">No traces.</div>`;
+  const failing = t.traces.filter(r => r.verdict !== "ok" && r.verdict !== "unknown");
+  rows.innerHTML = failing.length ? `<table class="data"><thead><tr><th>Query</th><th>Verdict</th><th>Why</th></tr></thead><tbody>
+    ${failing.map(r => `<tr class="rowlink" onclick="location='/traces/${esc(r.trace_id)}?project=${encodeURIComponent(project)}'">
+      <td>${esc(truncate(r.query || r.trace_id, 90))}</td><td>${triageBadge(r.verdict)}</td>
+      <td class="muted small">${esc(r.reason)}</td></tr>`).join("")}</tbody></table>` : "";
+}
+
 async function load(project) {
+  loadTriage(project).catch(e => {
+    document.getElementById("triageRows").innerHTML = `<div class="empty">${esc(e.message)}</div>`;
+  });
   const agg = document.getElementById("aggregate");
   const per = document.getElementById("pertrace");
   if (!project) { agg.innerHTML = ""; per.innerHTML = `<div class="empty">No project selected.</div>`; return; }

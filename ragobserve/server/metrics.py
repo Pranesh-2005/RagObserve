@@ -103,3 +103,113 @@ def evaluate_traces(pairs: List[Dict[str, Any]], k: int = 10) -> Dict[str, Any]:
         "ndcg": _mean([t["ndcg"] for t in per_trace]),
     }
     return {"per_trace": per_trace, "aggregate": aggregate}
+
+
+# ------------------------------------------------------------------ triage
+
+def ids_of(results: Optional[List[Any]]) -> List[str]:
+    """Chunk ids of a result list; content hash when a result has no id."""
+    from ..events import content_hash
+
+    out = []
+    for item in results or []:
+        if isinstance(item, dict):
+            cid = item.get("id") or (content_hash(item["text"]) if item.get("text") else None)
+            if cid:
+                out.append(cid)
+    return out
+
+
+# verdict -> the stage to blame, in pipeline order
+TRIAGE_VERDICTS = {
+    "error": "a span raised",
+    "empty_retrieval": "retrieval returned nothing",
+    "retrieval_miss": "no relevant chunk was retrieved",
+    "rerank_drop": "reranker dropped every relevant chunk",
+    "context_drop": "relevant chunk retrieved but left out of the prompt",
+    "unsupported_claims": "answer makes claims the context doesn't support",
+    "unfaithful": "answer not grounded in the context",
+    "off_topic": "answer doesn't address the query",
+    "ok": "no failure found",
+    "unknown": "not enough signal: log ground truth or run eval",
+}
+
+
+def triage(trace_data: Dict[str, Any], scores: Optional[Dict[str, Optional[float]]] = None,
+           threshold: float = 0.5) -> Dict[str, str]:
+    """Blame the *first* stage that broke, walking the pipeline in order.
+
+    Retrieval verdicts need ground truth; answer verdicts need eval scores
+    (``faithfulness`` / ``answer_relevance``) or a grounding span.
+    """
+    from ..events import content_hash
+
+    scores = scores or {}
+    events = trace_data.get("events") or []
+    relevant = {str(x) for x in trace_data.get("ground_truth") or []}
+
+    def verdict(v: str) -> Dict[str, str]:
+        return {"verdict": v, "reason": TRIAGE_VERDICTS[v]}
+
+    if (trace_data.get("trace") or {}).get("status") == "error" or any(
+            e.get("status") == "error" for e in events):
+        return verdict("error")
+
+    # match on id *and* text hash: real apps mix schemes in one trace (int ids
+    # on retrieval, none on rerank/context), and ground truth may use either
+    def keys(results):
+        out = set(ids_of(results))
+        out |= {content_hash(r["text"]) for r in results or [] if isinstance(r, dict) and r.get("text")}
+        out |= {str(r["id"]) for r in results or [] if isinstance(r, dict) and r.get("id") is not None}
+        return out
+
+    retrieved, reranked, context, grounding = set(), None, None, None
+    has_retrieval = False
+    for e in events:
+        a, stage = e.get("attributes") or {}, e.get("stage")
+        if stage in ("retrieval", "fusion"):
+            has_retrieval = True
+            retrieved |= keys(a.get("results"))
+        elif stage == "reranking":
+            reranked = keys(a.get("after"))
+        elif stage == "context_assembly":
+            context = keys(a.get("chunks"))
+        elif stage == "grounding":
+            grounding = a.get("supported_ratio")
+
+    # an item carrying both an id and text links the schemes: relevant id 1 ->
+    # that text's hash, so id-less rerank/context items still match
+    for e in events:
+        a = e.get("attributes") or {}
+        for lst in (a.get("results"), a.get("after"), a.get("before"), a.get("chunks")):
+            for r in lst or []:
+                if isinstance(r, dict) and r.get("text") and r.get("id") is not None                         and str(r["id"]) in relevant:
+                    relevant.add(content_hash(r["text"]))
+
+    if has_retrieval and not retrieved:
+        return verdict("empty_retrieval")
+    if relevant and has_retrieval:
+        if not relevant & retrieved:
+            return verdict("retrieval_miss")
+        if reranked is not None and not relevant & reranked:
+            return verdict("rerank_drop")
+        if context is not None and not relevant & context:
+            return verdict("context_drop")
+    if grounding is not None and grounding < threshold:
+        return verdict("unsupported_claims")
+    faith, rel = scores.get("faithfulness"), scores.get("answer_relevance")
+    if faith is not None and faith < threshold:
+        return verdict("unfaithful")
+    if rel is not None and rel < threshold:
+        return verdict("off_topic")
+    if relevant or grounding is not None or faith is not None or rel is not None:
+        return verdict("ok")
+    return verdict("unknown")
+
+
+def percentile(values: List[float], p: float) -> Optional[float]:
+    vals = sorted(v for v in values if v is not None)
+    if not vals:
+        return None
+    i = min(len(vals) - 1, max(0, math.ceil(p / 100 * len(vals)) - 1))
+    return vals[i]

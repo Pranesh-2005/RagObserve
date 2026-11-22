@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from ..events import RagEvent, Stage, content_hash
+from ..events import RagEvent, Stage, content_hash, context_items
 from . import metrics as M
 from . import pricing
 from .auth import require_api_key
@@ -76,9 +76,11 @@ def build_router() -> APIRouter:
                 rerank = M.kendall_tau(_ids(a.get("before")), _ids(a.get("after")))
             elif ev["stage"] == "context_assembly":
                 context_ids = _ids(a.get("chunks"))
+        scores = {r["metric"]: r["score"] for r in store(request).get_eval_scores(trace_id)}
         t["derived"] = {
             "chunk_utilization": M.chunk_utilization(retrieved, context_ids),
             "reranker_kendall_tau": rerank,
+            "triage": M.triage(t, scores),
         }
         return t
 
@@ -109,6 +111,18 @@ def build_router() -> APIRouter:
         if media is None or not os.path.isfile(path):
             raise HTTPException(404, "image file is gone or not a supported type")
         return FileResponse(path, media_type=media)
+
+    @router.get("/triage")
+    def triage(request: Request, project: str, limit: int = Query(200, ge=1, le=2000),
+               threshold: float = 0.5):
+        """First failing stage per trace, plus counts per verdict."""
+        return _triage(store(request), project, limit, threshold)
+
+    @router.get("/compare")
+    def compare(request: Request, a: str, b: str, k: int = 10):
+        """Side-by-side summary of two projects (e.g. two golden runs)."""
+        s = store(request)
+        return {"k": k, "a": _summary(s, a, k), "b": _summary(s, b, k)}
 
     @router.get("/metrics")
     def metrics(request: Request, project: str, k: int = 10):
@@ -144,20 +158,26 @@ def build_router() -> APIRouter:
         trace_id = req.trace_id
         project = req.project
 
+        images = []
+        if trace_id:
+            t = s.get_trace(trace_id)
+            if t is not None:
+                images = _replay_images(t["events"])
         if trace_id and not prompt:
             ctx = s.get_generation_context(trace_id)
             if ctx is None:
                 raise HTTPException(404, "trace not found")
             prompt = ctx.get("final_prompt") or ctx.get("query")
             system = system or ctx.get("system_prompt")
-            project = s.get_trace(trace_id)["trace"].get("project", project)
+            project = t["trace"].get("project", project)
         if not prompt:
             raise HTTPException(400, "nothing to generate from: pass prompt or a trace_id with context")
 
         import time as _time
         t0 = _time.time()
         try:
-            result = llm.generate(req.provider, req.model or "", prompt, system, req.max_tokens)
+            result = llm.generate(req.provider, req.model or "", prompt, system, req.max_tokens,
+                                  images=images or None)
         except llm.ProviderError as e:
             raise HTTPException(502, str(e))
         duration_ms = (_time.time() - t0) * 1000.0
@@ -179,7 +199,7 @@ def build_router() -> APIRouter:
                 "prompt": prompt, "system_prompt": system, "response": result["text"],
                 "input_tokens": result.get("input_tokens"),
                 "output_tokens": result.get("output_tokens"),
-                "cost": cost, "replayed": True,
+                "cost": cost, "replayed": True, "image_count": len(images),
             },
         )
         s.ingest_events([ev.model_dump()])
@@ -190,28 +210,43 @@ def build_router() -> APIRouter:
             "response": result["text"],
             "input_tokens": result.get("input_tokens"),
             "output_tokens": result.get("output_tokens"),
-            "cost": cost, "duration_ms": duration_ms,
+            "cost": cost, "duration_ms": duration_ms, "image_count": len(images),
         }
 
     # --------------------------------------------------- eval (LLM-as-judge)
 
     @router.post("/eval/{trace_id}")
     @limiter.limit("20/minute")
-    def run_eval(trace_id: str, request: Request, model: str = "llama3-8b-8192"):
-        """Run faithfulness + answer_relevance scoring on a trace via Groq.
+    def run_eval(
+        trace_id: str,
+        request: Request,
+        provider: str = "groq",
+        model: Optional[str] = None,
+        backend: str = Query("judge", pattern="^(judge|ragas)$"),
+    ):
+        """Score faithfulness + answer_relevance on a trace.
 
-        Requires ``GROQ_API_KEY`` set in the server environment.
+        ``backend=judge`` (default) uses the built-in LLM judge on any replay
+        provider (key from the server env, e.g. ``GROQ_API_KEY``).
+        ``backend=ragas`` uses Ragas metrics (``pip install ragobserve[ragas]``).
         Scores are persisted and returned with the trace via ``GET /api/traces/{id}``.
         """
-        from ..eval import evaluate_trace
+        from . import llm
 
         s = store(request)
         t = s.get_trace(trace_id)
         if t is None:
             raise HTTPException(404, "trace not found")
         try:
-            scores = evaluate_trace(t, model=model)
-        except RuntimeError as e:
+            if backend == "ragas":
+                from ..ragas import evaluate_trace as ragas_eval
+                scores = ragas_eval(t)
+                model = "ragas"
+            else:
+                from ..eval import evaluate_trace
+                model = model or llm.default_model(provider)
+                scores = evaluate_trace(t, model=model, provider=provider)
+        except (RuntimeError, ValueError) as e:
             raise HTTPException(502, str(e))
 
         project = t["trace"].get("project", "default")
@@ -256,11 +291,68 @@ def _image_paths(events: List[Dict[str, Any]]) -> set:
     return paths
 
 
-def _ids(results: Optional[List[Any]]) -> List[str]:
+def _triage(s, project: str, limit: int, threshold: float = 0.5) -> Dict[str, Any]:
+    # ponytail: one get_trace per row (N+1 queries); fine at the 2000-row cap
+    rows, counts = [], {}
+    for t in s.list_traces(project, limit):
+        detail = s.get_trace(t["trace_id"])
+        if detail is None:
+            continue
+        v = M.triage(detail, {"faithfulness": t.get("faithfulness_score"),
+                              "answer_relevance": t.get("answer_relevance_score")}, threshold)
+        counts[v["verdict"]] = counts.get(v["verdict"], 0) + 1
+        rows.append({"trace_id": t["trace_id"], "query": t.get("query"), **v})
+    return {"counts": counts, "traces": rows}
+
+
+def _summary(s, project: str, k: int) -> Dict[str, Any]:
+    traces = s.list_traces(project, 10_000)
+    lat = [t["duration_ms"] for t in traces if t.get("duration_ms") is not None]
+    costs = [t["cost"] for t in traces if t.get("cost") is not None]
+    n = len(traces)
+    return {
+        "project": project,
+        "traces": n,
+        "error_rate": (sum(1 for t in traces if t.get("status") == "error") / n) if n else None,
+        "latency_p50_ms": M.percentile(lat, 50),
+        "latency_p95_ms": M.percentile(lat, 95),
+        "avg_cost": (sum(costs) / len(costs)) if costs else None,
+        "total_cost": sum(costs) if costs else None,
+        "faithfulness": M._mean([t.get("faithfulness_score") for t in traces]),
+        "answer_relevance": M._mean([t.get("answer_relevance_score") for t in traces]),
+        "retrieval": M.evaluate_traces(s.traces_with_ground_truth(project), k)["aggregate"],
+        "triage": _triage(s, project, 500)["counts"],
+    }
+
+
+MAX_REPLAY_IMAGES = 8
+MAX_IMAGE_BYTES = 5 * 1024 * 1024
+
+
+def _replay_images(events: List[Dict[str, Any]]) -> List[tuple]:
+    """Images in what the model saw, as ``(mime, base64)`` for replay.
+
+    Paths are trusted for the same reason ``/api/image`` trusts them: they come
+    from this trace's own logged results, filtered to known image types.
+    ponytail: capped at 8 images / 5MB each, raise if vision prompts need more.
+    """
+    import base64
+
     out = []
-    for item in results or []:
-        if isinstance(item, dict):
-            cid = item.get("id") or (content_hash(item["text"]) if item.get("text") else None)
-            if cid:
-                out.append(cid)
+    for item in context_items(events):
+        meta = item.get("metadata") or {}
+        if meta.get("modality") != "image":
+            continue
+        if meta.get("image_b64"):
+            out.append((meta.get("mime") or "image/png", meta["image_b64"]))
+        elif meta.get("path"):
+            mime = IMAGE_TYPES.get(os.path.splitext(meta["path"])[1].lower())
+            if mime and os.path.isfile(meta["path"]) and os.path.getsize(meta["path"]) <= MAX_IMAGE_BYTES:
+                with open(meta["path"], "rb") as f:
+                    out.append((mime, base64.b64encode(f.read()).decode()))
+        if len(out) >= MAX_REPLAY_IMAGES:
+            break
     return out
+
+
+_ids = M.ids_of

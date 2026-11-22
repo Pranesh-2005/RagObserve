@@ -46,6 +46,30 @@ async function api(path) {
   return r.json();
 }
 
+/* POST JSON with the API key. Returns {ok, status, data} so callers can show
+   the server's `detail` message instead of a bare status code. */
+async function apiPost(path, body) {
+  const key = getApiKey();
+  const headers = { "Content-Type": "application/json" };
+  if (key) headers["Authorization"] = `Bearer ${key}`;
+  const r = await fetch(path, { method: "POST", headers, body: JSON.stringify(body || {}) });
+  if (r.status === 401) {
+    localStorage.removeItem("ragobserve_key");
+    showKeyPrompt();
+    throw new Error("Unauthorized");
+  }
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.detail || data.error || `HTTP ${r.status}`);
+  return data;
+}
+
+/* Triage verdict -> badge. Colour says whether it's a failure. */
+function triageBadge(v) {
+  if (!v) return "—";
+  const cls = v === "ok" ? "ok" : v === "unknown" ? "" : "error";
+  return `<span class="badge ${cls}">${esc(v.replace(/_/g, " "))}</span>`;
+}
+
 function esc(s) {
   if (s === null || s === undefined) return "";
   return String(s).replace(/[&<>"']/g, c => ({

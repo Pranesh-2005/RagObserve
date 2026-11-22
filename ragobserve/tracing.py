@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import contextvars
 import functools
+import inspect
 import time
 from typing import Any, Dict, List, Optional
 
@@ -69,6 +70,16 @@ class _TraceHandle:
 
     # -- decorator --------------------------------------------------------
     def __call__(self, fn):
+        # A sync wrapper around a coroutine function would close the span when the
+        # coroutine is *created*, before any of its work runs.
+        if inspect.iscoroutinefunction(fn):
+            @functools.wraps(fn)
+            async def awrapper(*args, **kwargs):
+                async with _TraceHandle(self._name or fn.__name__, self._stage, dict(self._attributes)):
+                    return await fn(*args, **kwargs)
+
+            return awrapper
+
         @functools.wraps(fn)
         def wrapper(*args, **kwargs):
             with _TraceHandle(self._name or fn.__name__, self._stage, dict(self._attributes)):
@@ -205,3 +216,21 @@ def log_ground_truth(relevant_chunk_ids: List[str], trace_id: Optional[str] = No
     if tid is None:
         raise ValueError("log_ground_truth needs an active trace or an explicit trace_id")
     _client.get_client().log_ground_truth(tid, _client.get_project(), relevant_chunk_ids)
+
+
+def log_grounding(claims: List[Dict[str, Any]], method: Optional[str] = None, **extra) -> RagEvent:
+    """Which answer sentences the context supports.
+
+    ``claims=[{"sentence": "...", "supported": True, "chunk_ids": ["c1"]}, ...]``
+    (``chunk_id`` works for a single id). ``supported_ratio`` is derived.
+    """
+    norm = []
+    for c in claims or []:
+        c = dict(c) if isinstance(c, dict) else {"sentence": str(c)}
+        if "chunk_ids" not in c and c.get("chunk_id"):
+            c["chunk_ids"] = [c.pop("chunk_id")]
+        norm.append(c)
+    judged = [c for c in norm if c.get("supported") is not None]
+    ratio = sum(1 for c in judged if c["supported"]) / len(judged) if judged else None
+    attrs = {"claims": norm, "supported_ratio": ratio, "method": method, **extra}
+    return _log(Stage.GROUNDING.value, "grounding", attrs)
