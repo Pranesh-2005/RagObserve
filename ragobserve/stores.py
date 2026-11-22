@@ -395,7 +395,10 @@ class PostgresStore:
         else:
             new_start = min(row["start_time"] or start, start)
             new_end = max(row["end_time"] or end, end)
-            new_query = row["query"] or query
+            # the root span holds the user's question; a child's query may be a
+            # rewrite, and the root is usually written last (it closes last)
+            is_root = not ev.get("parent_span_id")
+            new_query = (query if (is_root and query) else None) or row["query"] or query
             status = "error" if (row["status"] == "error" or ev.get("status") == "error") else "ok"
             cur.execute(
                 "UPDATE traces SET start_time=%s, end_time=%s, query=%s, status=%s WHERE trace_id=%s",
