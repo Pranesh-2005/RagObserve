@@ -1,6 +1,6 @@
 # RAGObserve — Complete Guide
 
-> v0.7.0
+> v0.8.0
 
 **Local-first observability, debugging, and evaluation for RAG systems. The "MLflow for RAG."**
 
@@ -1140,7 +1140,7 @@ Exceeding returns `HTTP 429`.
 ### Health endpoint (no auth)
 
 ```
-GET /health  →  {"status": "ok", "version": "0.7.0"}
+GET /health  →  {"status": "ok", "version": "0.8.0"}
 ```
 
 No API key required. Use for load balancer health checks and Kubernetes readiness probes.

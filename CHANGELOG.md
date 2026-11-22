@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.8.0] — 2026-11-22
 
 ### Added
 - **Ragas integration** (`ragobserve.ragas`). `ragobserve export --format ragas`

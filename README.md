@@ -1,6 +1,6 @@
 # RAGObserve
 
-> v0.7.0
+> v0.8.0
 
 **Local-first observability, debugging and evaluation for RAG systems. The MLflow for RAG.**
 
@@ -457,7 +457,7 @@ ragobserve export --project my-rag --format ragas -o samples.jsonl
 ## Health endpoint
 
 ```
-GET /health  →  {"status": "ok", "version": "0.7.0"}
+GET /health  →  {"status": "ok", "version": "0.8.0"}
 ```
 
 No auth required — use for load balancer health checks and container readiness probes.
