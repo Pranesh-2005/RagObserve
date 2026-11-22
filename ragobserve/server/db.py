@@ -32,6 +32,15 @@ CREATE TABLE IF NOT EXISTS eval_scores (
     PRIMARY KEY (trace_id, metric)
 );
 """),
+    # Events are upserted, so a re-sent event used to append a second set of
+    # chunk_retrievals rows and inflate chunk stats. Drop existing dupes, then
+    # make (event_id, content_hash) unique.
+    (2, """
+DELETE FROM chunk_retrievals WHERE id NOT IN (
+    SELECT MIN(id) FROM chunk_retrievals GROUP BY event_id, content_hash
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_cr_event_chunk ON chunk_retrievals(event_id, content_hash);
+"""),
 ]
 
 
@@ -250,7 +259,7 @@ class Store:
                 chash = register(item)
                 if chash:
                     cur.execute(
-                        "INSERT INTO chunk_retrievals(event_id, trace_id, project, content_hash, score, rank)"
+                        "INSERT OR IGNORE INTO chunk_retrievals(event_id, trace_id, project, content_hash, score, rank)"
                         " VALUES (?,?,?,?,?,?)",
                         (event_id, trace_id, project, chash, item.get("score"), item.get("rank", i + 1)),
                     )
