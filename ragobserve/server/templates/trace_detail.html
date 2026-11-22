@@ -174,12 +174,9 @@ async function runReplay() {
   status.innerHTML = `<span class="spin"></span> generating…`;
   result.innerHTML = "";
   try {
-    const r = await fetch("/api/generate", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ provider, model: model || null, trace_id: TRACE_ID, max_tokens: 1024 }),
-    });
-    const data = await r.json();
-    if (!r.ok) throw new Error(data.detail || `HTTP ${r.status}`);
+    // apiPost sends the API key; a bare fetch() here got 401 on every replay
+    const data = await apiPost("/api/generate",
+      { provider, model: model || null, trace_id: TRACE_ID, max_tokens: 1024 });
     status.textContent = "";
     result.innerHTML = `<dl class="kv" style="margin-top:12px">
         <dt>Model</dt><dd>${esc(data.model)} <span class="badge provider">${esc(data.provider)}</span></dd>
