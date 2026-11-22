@@ -5,6 +5,8 @@
 <h2>Pipeline waterfall</h2>
 <div id="waterfall" class="waterfall"><div class="empty">Loading…</div></div>
 <div id="detail" class="detail-panel" style="display:none"></div>
+<h2>Evaluation</h2>
+<div id="evalPanel" class="detail-panel"><div class="muted small">Loading…</div></div>
 {% endblock %}
 {% block scripts %}
 <script>
@@ -125,7 +127,7 @@ function renderGeneration(a) {
   return `<h2>Generation</h2>
     <dl class="kv">
       <dt>Model</dt><dd>${esc(a.model || "—")}${a.provider ? ` <span class="badge provider">${esc(a.provider)}</span>` : ""}${a.replayed ? ` <span class="badge replay">replay</span>` : ""}</dd>
-      <dt>Tokens</dt><dd>${a.input_tokens ?? "—"} in / ${a.output_tokens ?? "—"} out</dd>
+      <dt>Tokens</dt><dd>${a.input_tokens ?? "—"} in / ${a.output_tokens ?? "—"} out${a.image_tokens ? ` + ${a.image_tokens} image` : ""}</dd>
       <dt>Cost</dt><dd>${fmtCost(a.cost)}${a.cost_estimated ? ` <span class="muted small">(est.)</span>` : ""}</dd>
     </dl>
     ${a.prompt ? `<h2>Context / prompt used</h2><pre class="block">${esc(a.prompt)}</pre>` : ""}
@@ -183,12 +185,86 @@ async function runReplay() {
         <dt>Tokens</dt><dd>${data.input_tokens ?? "—"} in / ${data.output_tokens ?? "—"} out</dd>
         <dt>Cost</dt><dd>${fmtCost(data.cost)}</dd>
         <dt>Latency</dt><dd>${fmtMs(data.duration_ms)}</dd>
+        ${data.image_count ? `<dt>Images sent</dt><dd>${data.image_count}</dd>` : ""}
       </dl>
       <h2>New response</h2><pre class="block">${esc(data.response || "—")}</pre>
       <p class="muted small">Logged to this trace — <a href="javascript:location.reload()">reload</a> to see it in the waterfall.</p>`;
   } catch (e) {
     status.innerHTML = `<span class="shift-down">✕ ${esc(e.message)}</span>`;
   } finally {
+    btn.disabled = false;
+  }
+}
+
+function renderGrounding(a) {
+  const claims = a.claims || [];
+  const mark = c => c.supported === true ? `<span class="shift-up">✓ supported</span>`
+    : c.supported === false ? `<span class="shift-down">✕ unsupported</span>` : `<span class="muted">?</span>`;
+  return `<h2>Grounding</h2>
+    <dl class="kv">
+      <dt>Supported</dt><dd>${fmtPct(a.supported_ratio)} of ${claims.length} claim(s)</dd>
+      ${a.method ? `<dt>Method</dt><dd>${esc(a.method)}</dd>` : ""}
+    </dl>
+    ${claims.length ? `<table class="data"><thead><tr><th>Claim</th><th>Verdict</th><th>Evidence</th></tr></thead><tbody>
+      ${claims.map(c => `<tr><td>${esc(c.sentence || c.claim || "")}</td><td>${mark(c)}</td>
+        <td class="mono small">${esc((c.chunk_ids || []).join(", ") || "—")}</td></tr>`).join("")}
+    </tbody></table>` : `<p class="muted">no claims</p>`}`;
+}
+
+function renderChunking(a) {
+  return `<h2>Chunking</h2>
+    <dl class="kv">
+      <dt>Strategy</dt><dd>${esc(a.strategy || "—")}</dd>
+      <dt>Size / overlap</dt><dd>${esc(a.chunk_size ?? "—")} / ${esc(a.overlap ?? "—")}</dd>
+    </dl>
+    ${resultsTable(a.chunks)}`;
+}
+
+/* ---- evaluation + triage ------------------------------------------------- */
+async function renderEval() {
+  const el = document.getElementById("evalPanel");
+  const tri = (DATA.derived || {}).triage;
+  const { scores } = await api(`/api/eval/${encodeURIComponent(TRACE_ID)}`);
+  if (!PROVIDERS) PROVIDERS = await api("/api/providers");
+  el.innerHTML = `
+    ${tri ? `<p>${triageBadge(tri.verdict)} <span class="muted small">${esc(tri.reason)}</span></p>` : ""}
+    ${scores.length ? `<table class="data"><thead><tr><th>Metric</th><th>Score</th><th>Reason</th><th>Model</th></tr></thead><tbody>
+      ${scores.map(s => `<tr><td>${esc(s.metric)}</td><td class="mono">${fmtNum(s.score, 2)}</td>
+        <td class="small">${esc(s.reason || "")}</td><td class="mono small">${esc(s.model || "")}</td></tr>`).join("")}
+      </tbody></table>` : `<p class="muted small">Not scored yet.</p>`}
+    <div class="replay-controls" style="margin-top:10px">
+      <select id="evBackend"><option value="judge">LLM judge</option><option value="ragas">Ragas</option></select>
+      <select id="evProvider">${PROVIDERS.map(p => `<option value="${esc(p.id)}" ${p.id === "groq" ? "selected" : ""}>
+        ${esc(p.label)}${p.ready ? "" : " (not configured)"}</option>`).join("")}</select>
+      <input type="text" id="evModel" placeholder="model (blank = default)" size="22">
+      <button class="btn" id="evRun" onclick="runEval()">Score this trace</button>
+      <span id="evStatus" class="muted small"></span>
+    </div>`;
+  const sync = () => {
+    const judge = document.getElementById("evBackend").value === "judge";
+    document.getElementById("evProvider").style.display = judge ? "" : "none";
+    document.getElementById("evModel").style.display = judge ? "" : "none";
+  };
+  document.getElementById("evBackend").addEventListener("change", sync); sync();
+}
+
+async function runEval() {
+  const backend = document.getElementById("evBackend").value;
+  const q = new URLSearchParams({ backend });
+  if (backend === "judge") {
+    q.set("provider", document.getElementById("evProvider").value);
+    const m = document.getElementById("evModel").value.trim();
+    if (m) q.set("model", m);
+  }
+  const btn = document.getElementById("evRun"), status = document.getElementById("evStatus");
+  btn.disabled = true;
+  status.innerHTML = `<span class="spin"></span> scoring…`;
+  try {
+    await apiPost(`/api/eval/${encodeURIComponent(TRACE_ID)}?${q}`);
+    DATA = await api(`/api/traces/${encodeURIComponent(TRACE_ID)}`);  // triage may change
+    await renderEval();
+  } catch (e) {
+    status.innerHTML = `<span class="shift-down">✕ ${esc(e.message)}</span>`;
     btn.disabled = false;
   }
 }
@@ -206,6 +282,7 @@ function showEvent(ev, row) {
   const renderers = {
     retrieval: renderRetrieval, fusion: renderFusion, reranking: renderRerank,
     context_assembly: renderContext, generation: renderGeneration,
+    grounding: renderGrounding, chunking: renderChunking,
   };
   panel.innerHTML = (renderers[ev.stage] || (() => renderGeneric(ev)))(a) || renderGeneric(ev);
   panel.style.display = "block";
@@ -227,6 +304,7 @@ function showEvent(ev, row) {
     ["Spans", evs.length],
     ["Chunk utilization", fmtPct(d.chunk_utilization)],
     ["Reranker τ", fmtNum(d.reranker_kendall_tau, 2)],
+    ["Triage", d.triage ? triageBadge(d.triage.verdict) : "—"],
   ].map(([k, v]) => `<div class="card"><div class="muted small">${k}</div><div class="big">${v}</div></div>`).join("");
 
   const t0 = Math.min(...evs.map(e => e.start_time || 0));
@@ -246,6 +324,9 @@ function showEvent(ev, row) {
       <div class="mono muted">${fmtMs(ev.duration_ms)}</div>`;
     row.addEventListener("click", () => showEvent(ev, row));
     wf.appendChild(row);
+  });
+  renderEval().catch(e => {
+    document.getElementById("evalPanel").innerHTML = `<span class="shift-down">${esc(e.message)}</span>`;
   });
   // auto-open the most interesting span
   const interesting = ["context_assembly", "reranking", "retrieval", "generation"];
