@@ -176,11 +176,8 @@ class Store:
         attrs = ev.get("attributes") or {}
         # backfill generation cost from the price book when not supplied, so the
         # cost dashboards work even if the user didn't pass cost= explicitly.
-        if ev.get("stage") == "generation" and attrs.get("cost") in (None, 0):
-            est = pricing.estimate_cost(attrs.get("model"), attrs.get("input_tokens"),
-                                        attrs.get("output_tokens"))
-            if est is not None:
-                attrs = {**attrs, "cost": est, "cost_estimated": True}
+        if ev.get("stage") == "generation":
+            attrs = pricing.backfill_generation(attrs)
         cur.execute(
             "INSERT OR IGNORE INTO projects(name, created_at) VALUES (?, ?)",
             (project, time.time()),

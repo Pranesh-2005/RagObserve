@@ -158,20 +158,26 @@ def build_router() -> APIRouter:
         trace_id = req.trace_id
         project = req.project
 
+        images = []
+        if trace_id:
+            t = s.get_trace(trace_id)
+            if t is not None:
+                images = _replay_images(t["events"])
         if trace_id and not prompt:
             ctx = s.get_generation_context(trace_id)
             if ctx is None:
                 raise HTTPException(404, "trace not found")
             prompt = ctx.get("final_prompt") or ctx.get("query")
             system = system or ctx.get("system_prompt")
-            project = s.get_trace(trace_id)["trace"].get("project", project)
+            project = t["trace"].get("project", project)
         if not prompt:
             raise HTTPException(400, "nothing to generate from: pass prompt or a trace_id with context")
 
         import time as _time
         t0 = _time.time()
         try:
-            result = llm.generate(req.provider, req.model or "", prompt, system, req.max_tokens)
+            result = llm.generate(req.provider, req.model or "", prompt, system, req.max_tokens,
+                                  images=images or None)
         except llm.ProviderError as e:
             raise HTTPException(502, str(e))
         duration_ms = (_time.time() - t0) * 1000.0
@@ -193,7 +199,7 @@ def build_router() -> APIRouter:
                 "prompt": prompt, "system_prompt": system, "response": result["text"],
                 "input_tokens": result.get("input_tokens"),
                 "output_tokens": result.get("output_tokens"),
-                "cost": cost, "replayed": True,
+                "cost": cost, "replayed": True, "image_count": len(images),
             },
         )
         s.ingest_events([ev.model_dump()])
@@ -204,7 +210,7 @@ def build_router() -> APIRouter:
             "response": result["text"],
             "input_tokens": result.get("input_tokens"),
             "output_tokens": result.get("output_tokens"),
-            "cost": cost, "duration_ms": duration_ms,
+            "cost": cost, "duration_ms": duration_ms, "image_count": len(images),
         }
 
     # --------------------------------------------------- eval (LLM-as-judge)

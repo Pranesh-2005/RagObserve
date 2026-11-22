@@ -19,6 +19,7 @@ add their own models here without waiting on a release.
 from __future__ import annotations
 
 import json
+import math
 import os
 import time
 from functools import lru_cache
@@ -82,6 +83,8 @@ PRICE_BOOK: Dict[str, Tuple[float, float]] = {
     "grok-3-mini": (0.30, 0.50),
     "grok-2": (2.0, 10.0),
     # Groq (open-weight models, hosted)
+    "gpt-oss-20b": (0.075, 0.30),          # Groq
+    "gpt-oss-120b": (0.15, 0.60),
     "llama-3.1-8b-instant": (0.05, 0.08),
     "llama-3.3-70b-versatile": (0.59, 0.79),
     "llama-3.1-70b": (0.59, 0.79),
@@ -225,6 +228,54 @@ def estimate_cost(model: Optional[str], input_tokens: Optional[int],
     inp = (input_tokens or 0) / 1_000_000.0 * price[0]
     out = (output_tokens or 0) / 1_000_000.0 * price[1]
     return round(inp + out, 6)
+
+
+def image_tokens(model: Optional[str], width: int, height: int, detail: str = "high") -> int:
+    """Input tokens one image costs, from each vendor's published sizing rule.
+
+    ponytail: three formulas cover Claude / Gemini / OpenAI-style tiling; other
+    vendors fall back to the OpenAI rule. Pass ``image_tokens=`` to override.
+    """
+    m = (model or "").lower()
+    w, h = max(int(width or 0), 1), max(int(height or 0), 1)
+    if "claude" in m:
+        # long edge capped at 1568px, then ~w*h/750
+        s = min(1.0, 1568 / max(w, h))
+        return math.ceil((w * s) * (h * s) / 750)
+    if "gemini" in m:
+        if w <= 384 and h <= 384:
+            return 258
+        return 258 * math.ceil(w / 768) * math.ceil(h / 768)
+    # OpenAI: fit in 2048x2048, shortest side to 768, then 512px tiles
+    base, per_tile = (2833, 5667) if "4o-mini" in m else (85, 170)
+    if detail == "low":
+        return base
+    s = min(1.0, 2048 / max(w, h))
+    w, h = w * s, h * s
+    s = min(1.0, 768 / min(w, h))
+    w, h = w * s, h * s
+    return base + per_tile * math.ceil(w / 512) * math.ceil(h / 512)
+
+
+def backfill_generation(attrs: Dict) -> Dict:
+    """Fill ``image_tokens`` and an estimated ``cost`` on a generation's attributes.
+
+    ``images=[{"width":..,"height":..,"detail"?:..}]`` adds image tokens on top of
+    ``input_tokens``. Pass ``input_tokens`` as the *text* count when you do: provider
+    usage numbers already include images, so don't pass ``images`` with those.
+    Shared by every store so SQLite and Postgres estimate identically.
+    """
+    images = attrs.get("images")
+    if images and attrs.get("image_tokens") is None:
+        attrs = {**attrs, "image_tokens": sum(
+            image_tokens(attrs.get("model"), i.get("width"), i.get("height"), i.get("detail", "high"))
+            for i in images if isinstance(i, dict))}
+    if attrs.get("cost") in (None, 0):
+        inp = (attrs.get("input_tokens") or 0) + (attrs.get("image_tokens") or 0)
+        est = estimate_cost(attrs.get("model"), inp or None, attrs.get("output_tokens"))
+        if est is not None:
+            attrs = {**attrs, "cost": est, "cost_estimated": True}
+    return attrs
 
 
 def is_known(model: Optional[str]) -> bool:

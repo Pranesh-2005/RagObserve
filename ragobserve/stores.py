@@ -364,12 +364,8 @@ class PostgresStore:
         trace_id = ev.get("trace_id") or ev.get("event_id")
         attrs = dict(ev.get("attributes") or {})
 
-        if ev.get("stage") == "generation" and attrs.get("cost") in (None, 0):
-            est = pricing.estimate_cost(attrs.get("model"), attrs.get("input_tokens"),
-                                        attrs.get("output_tokens"))
-            if est is not None:
-                attrs["cost"] = est
-                attrs["cost_estimated"] = True
+        if ev.get("stage") == "generation":
+            attrs = pricing.backfill_generation(attrs)
 
         cur.execute(
             "INSERT INTO projects(name, created_at) VALUES (%s, %s) ON CONFLICT DO NOTHING",
