@@ -17,7 +17,22 @@ def _store_arg(p: argparse.ArgumentParser) -> None:
     )
 
 
+def _open_store(uri):
+    """Postgres for a postgres:// DSN, else SQLite at the path (or the default)."""
+    uri = uri or ""
+    if uri.startswith(("postgresql://", "postgres://")):
+        from .stores import PostgresStore
+        return PostgresStore(uri)
+    from .server.db import Store
+    from .storage import resolve
+    return Store(resolve(uri or None))
+
+
 def main(argv=None) -> int:
+    # Windows pipes/redirects default to cp1252, which can't encode the → / ✓ we
+    # print, so `ragobserve ui > log.txt` crashed before the server started.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(errors="replace")
     parser = argparse.ArgumentParser(
         prog="ragobserve",
         description="RAGObserve — local-first observability for RAG systems",
@@ -114,34 +129,32 @@ def main(argv=None) -> int:
         import uvicorn
         from .server.app import create_app
         from .server.auth import get_api_key
-        from .storage import resolve
 
         if args.key:
             os.environ["RAGOBSERVE_API_KEY"] = args.key
 
         key = get_api_key()
-        store_path = resolve(args.backend_store_uri)
-        app = create_app(store_path)
+        store = _open_store(args.backend_store_uri)
+        app = create_app(store=store)
 
         print(f"RAGObserve UI  → http://{args.host}:{args.port}/?key={key}")
         print(f"API key        → {key}")
-        print(f"Store          → {store_path}")
+        print(f"Store          → {getattr(store, 'path', None) or 'postgres'}")
         print("Set RAGOBSERVE_API_KEY env var to use a fixed key.")
         uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
         return 0
 
     if args.command == "export":
         import json
-        from .storage import resolve
 
-        uri = args.backend_store_uri or ""
-        if uri.startswith("postgresql://") or uri.startswith("postgres://"):
-            from .stores import PostgresStore
-            store = PostgresStore(uri)
-        else:
-            from .server.db import Store
-            store = Store(resolve(uri or None))
+        store = _open_store(args.backend_store_uri)
         traces = store.list_traces(args.project, limit=args.limit)
+
+        if args.format == "ragas":
+            from .ragas import trace_to_sample
+            fmt = trace_to_sample
+        else:
+            fmt = lambda d: d  # noqa: E731
 
         out = open(args.output, "w", encoding="utf-8") if args.output != "-" else sys.stdout
         try:

@@ -31,11 +31,13 @@ async def _lifespan(app: FastAPI):
     yield
 
 
-def create_app(db_path: str | None = None) -> FastAPI:
+def create_app(db_path: str | None = None, store=None) -> FastAPI:
+    """``store`` takes any backend with the dashboard query methods (Store,
+    PostgresStore); otherwise a SQLite Store is opened at ``db_path``."""
     from ..storage import resolve
 
     app = FastAPI(title="RAGObserve", docs_url="/api/docs", lifespan=_lifespan)
-    app.state.store = Store(resolve(db_path))
+    app.state.store = store if store is not None else Store(resolve(db_path))
     app.state.api_key = get_api_key()
     app.state.limiter = limiter
     app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
