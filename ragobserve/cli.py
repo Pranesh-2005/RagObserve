@@ -49,23 +49,55 @@ def main(argv=None) -> int:
     _store_arg(ui)
 
     # ── export ──────────────────────────────────────────────────────────────
-    exp = sub.add_parser("export", help="export traces to NDJSON")
+    exp = sub.add_parser("export", help="export traces to NDJSON (raw traces or Ragas samples)")
     exp.add_argument("--project", required=True, metavar="NAME")
+    exp.add_argument("--format", choices=["raw", "ragas"], default="raw",
+                     help="raw = full trace JSON; ragas = one Ragas sample per line "
+                          "(user_input, retrieved_contexts, response, ...)")
     exp.add_argument("--output", "-o", default="-", metavar="FILE",
                      help="output file path (default: stdout)")
     exp.add_argument("--limit", type=int, default=10_000)
     _store_arg(exp)
 
     # ── eval ────────────────────────────────────────────────────────────────
-    ev = sub.add_parser("eval", help="run LLM-as-judge faithfulness scoring on a project")
+    ev = sub.add_parser("eval", help="score faithfulness + relevance on a project")
     ev.add_argument("--project", required=True, metavar="NAME")
-    ev.add_argument("--model", default="llama3-8b-8192",
-                    help="Groq model (default: llama3-8b-8192)")
+    ev.add_argument("--backend", choices=["judge", "ragas"], default="judge",
+                    help="judge = built-in LLM judge (default); ragas = Ragas metrics")
+    ev.add_argument("--provider", default="groq",
+                    help="judge provider, any from `ragobserve providers` (default: groq)")
+    ev.add_argument("--model", default=None,
+                    help="judge model (default: the provider's default model)")
     ev.add_argument("--limit", type=int, default=50,
                     help="max traces to score (default: 50)")
-    ev.add_argument("--api-key", default=os.getenv("GROQ_API_KEY", ""),
-                    help="Groq API key (default: $GROQ_API_KEY)")
+    ev.add_argument("--api-key", default="",
+                    help="judge provider API key (default: the provider's env var)")
     _store_arg(ev)
+
+    # ── test (golden-set regression) ────────────────────────────────────────
+    ts = sub.add_parser("test", help="run a golden question set through your pipeline; "
+                                     "exit 1 if quality drops below thresholds")
+    ts.add_argument("--golden", required=True, metavar="FILE",
+                    help="JSONL: {question, relevant_chunk_ids?, reference?} per line")
+    ts.add_argument("--pipeline", required=True, metavar="MODULE:FN",
+                    help="your instrumented fn(question) -> answer, e.g. app.rag:answer")
+    ts.add_argument("--project", default=None,
+                    help="project for this run (default: golden-<timestamp>)")
+    ts.add_argument("--k", type=int, default=10)
+    for name in ("recall", "precision", "mrr", "ndcg", "faithfulness", "answer_relevance"):
+        ts.add_argument(f"--min-{name.replace('_', '-')}", type=float, default=None, metavar="X")
+    ts.add_argument("--judge-provider", default=None,
+                    help="score faithfulness/relevance with the LLM judge on this provider "
+                         "(implied as groq by --min-faithfulness / --min-answer-relevance)")
+    ts.add_argument("--judge-model", default=None)
+    ts.add_argument("--json", action="store_true", help="print the report as JSON")
+    _store_arg(ts)
+
+    # ── import-ragas ────────────────────────────────────────────────────────
+    ir = sub.add_parser("import-ragas", help="attach scores from a Ragas results CSV/JSONL to traces")
+    ir.add_argument("file", metavar="FILE", help="result.to_pandas().to_csv(...) output, or JSONL")
+    ir.add_argument("--project", required=True, metavar="NAME")
+    _store_arg(ir)
 
     # ── providers ───────────────────────────────────────────────────────────
     sub.add_parser("providers", help="list LLM providers available for generation replay")
@@ -161,7 +193,7 @@ def main(argv=None) -> int:
             for t in traces:
                 detail = store.get_trace(t["trace_id"])
                 if detail:
-                    out.write(json.dumps(detail, default=str) + "\n")
+                    out.write(json.dumps(fmt(detail), default=str) + "\n")
         finally:
             if args.output != "-":
                 out.close()
@@ -173,23 +205,29 @@ def main(argv=None) -> int:
 
     if args.command == "eval":
         from .eval import evaluate_trace
-        from .storage import resolve
+        from .server import llm
 
-        if args.api_key:
-            os.environ["GROQ_API_KEY"] = args.api_key
-
-        uri = args.backend_store_uri or ""
-        if uri.startswith("postgresql://") or uri.startswith("postgres://"):
-            from .stores import PostgresStore
-            store = PostgresStore(uri)
-        else:
-            from .server.db import Store
-            store = Store(resolve(uri or None))
+        store = _open_store(args.backend_store_uri)
         traces = store.list_traces(args.project, limit=args.limit)
 
         if not traces:
             print(f"No traces found for project '{args.project}'")
             return 1
+
+        if args.backend == "ragas":
+            from .ragas import evaluate_trace as ragas_eval
+            model = "ragas"
+            score = ragas_eval
+        else:
+            try:
+                model = args.model or llm.default_model(args.provider)
+            except llm.ProviderError as e:
+                print(str(e), file=sys.stderr)
+                return 1
+
+            def score(detail):
+                return evaluate_trace(detail, model=model, api_key=args.api_key,
+                                      provider=args.provider)
 
         ok = 0
         for t in traces:
@@ -197,11 +235,11 @@ def main(argv=None) -> int:
             if detail is None:
                 continue
             try:
-                scores = evaluate_trace(detail, model=args.model)
+                scores = score(detail)
                 for metric, result in scores.items():
                     store.set_eval_score(
                         t["trace_id"], args.project, metric,
-                        result.get("score"), result.get("reason", ""), args.model,
+                        result.get("score"), result.get("reason", ""), model,
                     )
                 faith = scores["faithfulness"]["score"]
                 rel   = scores["answer_relevance"]["score"]
@@ -214,6 +252,49 @@ def main(argv=None) -> int:
 
         print(f"\nScored {ok}/{len(traces)} traces for project '{args.project}'")
         return 0
+
+    if args.command == "test":
+        import json
+        from . import golden
+
+        try:
+            rows = golden.load_golden(args.golden)
+            pipeline = golden.load_pipeline(args.pipeline)
+        except (OSError, ValueError, ImportError, AttributeError) as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 2
+        minimums = {n: getattr(args, f"min_{n}") for n in golden.THRESHOLDS}
+        provider = args.judge_provider or (
+            "groq" if minimums["faithfulness"] is not None or minimums["answer_relevance"] is not None
+            else None)
+        judge = {"provider": provider, "model": args.judge_model} if provider else None
+        project = args.project or golden.default_project()
+        store = _open_store(args.backend_store_uri)
+        report = golden.run(pipeline, rows, store, project, k=args.k, judge=judge)
+        fails = golden.check(report, minimums)
+        if args.json:
+            print(json.dumps({**report, "failures": fails}, indent=2, default=str))
+        else:
+            def f(v):
+                return "n/a" if v is None else f"{v:.3f}"
+            print(f"project  {project}  ({report['questions']} questions, k={args.k})")
+            for n in golden.THRESHOLDS:
+                floor = minimums[n]
+                print(f"  {n:<17}{f(report[n]):>8}" + (f"   min {floor}" if floor is not None else ""))
+            for e in report["errors"]:
+                print(f"  ERROR  {e['question'][:60]}: {e['error']}", file=sys.stderr)
+            print("FAIL\n  " + "\n  ".join(fails) if fails else "PASS")
+        return 1 if fails else 0
+
+    if args.command == "import-ragas":
+        from .ragas import import_results, read_results
+
+        store = _open_store(args.backend_store_uri)
+        res = import_results(store, args.project, read_results(args.file))
+        print(f"matched {res['matched']} rows, stored {res['scores']} scores")
+        for u in res["unmatched"][:10]:
+            print(f"  unmatched: {str(u)[:80]}", file=sys.stderr)
+        return 0 if res["matched"] else 1
 
     parser.print_help()
     return 1
