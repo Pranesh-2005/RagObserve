@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import secrets
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -15,7 +17,7 @@ from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 
 from .api import build_router
-from .auth import get_api_key
+from .auth import get_api_key, require_api_key
 from . import bus
 from .db import Store
 from .ratelimit import limiter
@@ -82,6 +84,31 @@ def create_app(db_path: str | None = None, store=None) -> FastAPI:
     @app.get("/generations", response_class=HTMLResponse)
     def generations(request: Request, project: str = ""):
         return page(request, "generations", project=project)
+
+    @app.post("/v1/traces", dependencies=[Depends(require_api_key)])
+    @limiter.limit("500/minute")
+    async def otlp_traces(request: Request):
+        """OTLP/HTTP trace receiver (JSON, or protobuf with opentelemetry-proto)."""
+        from . import otel
+
+        ctype = request.headers.get("content-type", "")
+        body = await request.body()
+        if "protobuf" in ctype:
+            try:
+                payload = otel.decode_protobuf(body)
+            except ImportError:
+                return JSONResponse(
+                    {"error": "protobuf OTLP needs `pip install ragobserve[otel]` on the server, "
+                              "or set OTEL_EXPORTER_OTLP_TRACES_PROTOCOL=http/json"}, 415)
+        else:
+            try:
+                payload = json.loads(body or b"{}")
+            except ValueError:
+                return JSONResponse({"error": "body is not OTLP JSON"}, 400)
+        events = otel.otlp_to_events(payload, request.headers.get("x-ragobserve-project"))
+        if events:
+            await run_in_threadpool(app.state.store.ingest_events, events)
+        return JSONResponse({"partialSuccess": {}})
 
     @app.websocket("/ws/traces")
     async def ws_traces(websocket: WebSocket, key: str = "", project: str = ""):
