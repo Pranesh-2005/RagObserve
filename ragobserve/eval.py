@@ -3,8 +3,9 @@
 Faithfulness   — does the answer stay grounded in the retrieved context?
 Answer relevance — does the answer address the original query?
 
-Uses Groq (fast, free tier) by default. Set ``GROQ_API_KEY`` in the environment
-or pass ``api_key`` explicitly. The same httpx client already bundled as a core dep.
+Judges through the generation-replay provider registry (``server/llm.py``), so
+any provider works; Groq is the default. Set its key env var (``GROQ_API_KEY``)
+or pass ``api_key`` explicitly. For Ragas metrics instead, see ``ragobserve.ragas``.
 
 Usage::
 
@@ -17,7 +18,6 @@ Usage::
 from __future__ import annotations
 
 import json
-import os
 import re
 from typing import Any, Dict, List, Optional
 
@@ -54,36 +54,24 @@ Respond ONLY with a single JSON object on one line:
 Score 1.0 = the answer directly and completely answers the query.
 Score 0.0 = the answer is off-topic or does not address the query at all."""
 
-_DEFAULT_GROQ_MODEL = "llama3-8b-8192"
-_GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
+DEFAULT_PROVIDER = "groq"
 
 
 def _call_llm(
     prompt: str,
-    model: str = _DEFAULT_GROQ_MODEL,
+    model: Optional[str] = None,
     api_key: str = "",
-    base_url: str = _GROQ_URL,
+    provider: str = DEFAULT_PROVIDER,
 ) -> Dict[str, Any]:
-    key = api_key or os.environ.get("GROQ_API_KEY", "")
-    if not key:
-        raise RuntimeError(
-            "GROQ_API_KEY not set. Set the env var or pass api_key= to enable LLM-as-judge metrics."
-        )
-    import httpx
+    """Judge call through the same provider registry generation replay uses, so
+    any of its providers can judge. ``model=None`` → the provider's default."""
+    from .server import llm
 
-    r = httpx.post(
-        base_url,
-        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-        json={
-            "model": model,
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.0,
-            "max_tokens": 150,
-        },
-        timeout=30.0,
-    )
-    r.raise_for_status()
-    text = r.json()["choices"][0]["message"]["content"].strip()
+    # 1024, not ~150: reasoning models (gpt-oss, o-series) spend the budget on
+    # hidden reasoning first; 150 left Groq's gpt-oss-20b with ~30 tokens of answer.
+    out = llm.generate(provider, model or "", prompt, max_tokens=1024,
+                       temperature=0.0, api_key=api_key or None)
+    text = (out.get("text") or "").strip()
     # Try full text first (handles nested JSON), then extract first {...} block
     try:
         return json.loads(text)
@@ -101,16 +89,18 @@ def _call_llm(
 def score_faithfulness(
     answer: str,
     context: List[Any],
-    model: str = _DEFAULT_GROQ_MODEL,
+    model: Optional[str] = None,
     api_key: str = "",
+    provider: str = DEFAULT_PROVIDER,
 ) -> Dict[str, Any]:
     """Score 0–1: how grounded is the answer in the retrieved context?
 
     Args:
         answer:  The generated response to evaluate.
         context: Retrieved chunks — list of str or dict with a ``text`` key.
-        model:   Groq model to use (default: llama3-8b-8192, fast & free).
-        api_key: Groq API key (falls back to ``GROQ_API_KEY`` env var).
+        model:    Judge model (default: the provider's default model).
+        api_key:  Provider key (falls back to the provider's env var, e.g. ``GROQ_API_KEY``).
+        provider: Any provider from ``ragobserve providers`` (default: groq).
 
     Returns:
         ``{"score": float, "reason": str}``
@@ -125,15 +115,16 @@ def score_faithfulness(
     if not (answer or "").strip():
         return {"score": None, "reason": "no answer to evaluate"}
 
-    result = _call_llm(_FAITHFULNESS_PROMPT.format(context=ctx_text, answer=answer), model, api_key)
+    result = _call_llm(_FAITHFULNESS_PROMPT.format(context=ctx_text, answer=answer), model, api_key, provider)
     return {"score": float(result.get("score", 0)), "reason": str(result.get("reason", ""))}
 
 
 def score_answer_relevance(
     answer: str,
     query: str,
-    model: str = _DEFAULT_GROQ_MODEL,
+    model: Optional[str] = None,
     api_key: str = "",
+    provider: str = DEFAULT_PROVIDER,
 ) -> Dict[str, Any]:
     """Score 0–1: how well does the answer address the original query?
 
@@ -145,14 +136,15 @@ def score_answer_relevance(
     if not (answer or "").strip():
         return {"score": None, "reason": "no answer to evaluate"}
 
-    result = _call_llm(_RELEVANCE_PROMPT.format(query=query, answer=answer), model, api_key)
+    result = _call_llm(_RELEVANCE_PROMPT.format(query=query, answer=answer), model, api_key, provider)
     return {"score": float(result.get("score", 0)), "reason": str(result.get("reason", ""))}
 
 
 def evaluate_trace(
     trace_data: Dict[str, Any],
-    model: str = _DEFAULT_GROQ_MODEL,
+    model: Optional[str] = None,
     api_key: str = "",
+    provider: str = DEFAULT_PROVIDER,
 ) -> Dict[str, Any]:
     """Run all eval metrics on a fully-loaded trace dict (from ``get_trace``).
 
@@ -173,6 +165,6 @@ def evaluate_trace(
             chunks = a.get("chunks") or []
 
     return {
-        "faithfulness": score_faithfulness(answer, chunks, model, api_key),
-        "answer_relevance": score_answer_relevance(answer, query, model, api_key),
+        "faithfulness": score_faithfulness(answer, chunks, model, api_key, provider),
+        "answer_relevance": score_answer_relevance(answer, query, model, api_key, provider),
     }

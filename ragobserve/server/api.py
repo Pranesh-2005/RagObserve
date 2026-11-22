@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from ..events import RagEvent, Stage, content_hash
+from ..events import RagEvent, Stage, content_hash, context_items
 from . import metrics as M
 from . import pricing
 from .auth import require_api_key
@@ -197,21 +197,36 @@ def build_router() -> APIRouter:
 
     @router.post("/eval/{trace_id}")
     @limiter.limit("20/minute")
-    def run_eval(trace_id: str, request: Request, model: str = "llama3-8b-8192"):
-        """Run faithfulness + answer_relevance scoring on a trace via Groq.
+    def run_eval(
+        trace_id: str,
+        request: Request,
+        provider: str = "groq",
+        model: Optional[str] = None,
+        backend: str = Query("judge", pattern="^(judge|ragas)$"),
+    ):
+        """Score faithfulness + answer_relevance on a trace.
 
-        Requires ``GROQ_API_KEY`` set in the server environment.
+        ``backend=judge`` (default) uses the built-in LLM judge on any replay
+        provider (key from the server env, e.g. ``GROQ_API_KEY``).
+        ``backend=ragas`` uses Ragas metrics (``pip install ragobserve[ragas]``).
         Scores are persisted and returned with the trace via ``GET /api/traces/{id}``.
         """
-        from ..eval import evaluate_trace
+        from . import llm
 
         s = store(request)
         t = s.get_trace(trace_id)
         if t is None:
             raise HTTPException(404, "trace not found")
         try:
-            scores = evaluate_trace(t, model=model)
-        except RuntimeError as e:
+            if backend == "ragas":
+                from ..ragas import evaluate_trace as ragas_eval
+                scores = ragas_eval(t)
+                model = "ragas"
+            else:
+                from ..eval import evaluate_trace
+                model = model or llm.default_model(provider)
+                scores = evaluate_trace(t, model=model, provider=provider)
+        except (RuntimeError, ValueError) as e:
             raise HTTPException(502, str(e))
 
         project = t["trace"].get("project", "default")

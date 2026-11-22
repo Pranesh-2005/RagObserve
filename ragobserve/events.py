@@ -125,3 +125,19 @@ def normalize_result(item: Any) -> Dict[str, Any]:
             "metadata": dict(getattr(item, "metadata", {}) or {}),
         }
     return {"text": str(item)}
+
+
+def context_items(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """What the model saw: assembled context, else reranked hits, else raw retrieval."""
+    by_stage: Dict[str, List[Any]] = {}
+    for ev in events:
+        a = ev.get("attributes") or {}
+        stage = ev.get("stage")
+        if stage == "context_assembly":
+            by_stage.setdefault("context", a.get("chunks") or [])
+        elif stage == "reranking":
+            by_stage.setdefault("rerank", a.get("after") or [])
+        elif stage == "retrieval":
+            by_stage.setdefault("retrieval", a.get("results") or [])
+    items = by_stage.get("context") or by_stage.get("rerank") or by_stage.get("retrieval") or []
+    return [i if isinstance(i, dict) else {"text": str(i)} for i in items]
