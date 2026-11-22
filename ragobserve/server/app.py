@@ -81,6 +81,10 @@ def create_app(db_path: str | None = None, store=None) -> FastAPI:
     def metrics(request: Request, project: str = ""):
         return page(request, "metrics", project=project)
 
+    @app.get("/compare", response_class=HTMLResponse)
+    def compare(request: Request):
+        return page(request, "compare")
+
     @app.get("/generations", response_class=HTMLResponse)
     def generations(request: Request, project: str = ""):
         return page(request, "generations", project=project)
