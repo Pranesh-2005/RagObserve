@@ -56,7 +56,7 @@ PROVIDERS: Dict[str, Dict[str, Any]] = {
     },
     "groq": {
         "label": "Groq", "kind": "openai", "env": ["GROQ_API_KEY"],
-        "base": "https://api.groq.com/openai/v1", "default_model": "llama-3.3-70b-versatile",
+        "base": "https://api.groq.com/openai/v1", "default_model": "openai/gpt-oss-20b",
     },
     "openrouter": {
         "label": "OpenRouter", "kind": "openai", "env": ["OPENROUTER_API_KEY"],
