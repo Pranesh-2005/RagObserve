@@ -64,7 +64,7 @@ Notes on the numbers:
 - SQLite runs in WAL mode with `synchronous=NORMAL`. Crash-safe against process death; only the last few events are at risk on host power loss.
 - `log_context` calls `estimate_tokens`, which costs ~0.5 ms per 5KB when `tiktoken` is installed and is free otherwise (`len//4` fallback).
 
-Reproduce with `python examples/bench_overhead.py`.
+Reproduce with `python examples/bench_overhead.py`. The pre-WAL numbers can be reproduced with `RAGOBSERVE_BENCH_NO_WAL=1 python examples/bench_overhead.py`, which runs SQLite at its defaults (`journal_mode=delete`, `synchronous=FULL`).
 
 Then explore:
 

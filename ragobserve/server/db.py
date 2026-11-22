@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sqlite3
 import threading
 import time
@@ -130,8 +131,11 @@ class Store:
         # WAL + synchronous=NORMAL keeps crash-safety against process death and only
         # risks the last commits on host power loss, which is the right trade for
         # observability data sitting on an app's hot path.
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute("PRAGMA synchronous=NORMAL")
+        # RAGOBSERVE_BENCH_NO_WAL exists only to reproduce the pre-0.6.0 benchmark
+        # (journal_mode=delete, synchronous=FULL) — not for real use.
+        if not os.environ.get("RAGOBSERVE_BENCH_NO_WAL"):
+            self._conn.execute("PRAGMA journal_mode=WAL")
+            self._conn.execute("PRAGMA synchronous=NORMAL")
         with self._lock:
             self._conn.executescript(SCHEMA)
             self._conn.commit()
