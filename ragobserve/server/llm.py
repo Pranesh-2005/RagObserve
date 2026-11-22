@@ -23,7 +23,7 @@ Cost is computed by the caller via ``pricing.estimate_cost``.
 from __future__ import annotations
 
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 
@@ -92,6 +92,8 @@ PROVIDERS: Dict[str, Dict[str, Any]] = {
 
 
 def _api_key(cfg: Dict[str, Any]) -> Optional[str]:
+    if cfg.get("key"):
+        return cfg["key"]
     for name in cfg.get("env", []):
         val = os.getenv(name)
         if val:
@@ -101,20 +103,28 @@ def _api_key(cfg: Dict[str, Any]) -> Optional[str]:
 
 # --------------------------------------------------------------------- backends
 
-def _call_openai_compatible(cfg, model, system, prompt, max_tokens) -> Dict[str, Any]:
+def _call_openai_compatible(cfg, model, system, prompt, max_tokens, temperature=None, images=None) -> Dict[str, Any]:
     key = _api_key(cfg)
     if not key:
         raise ProviderError(f"missing API key ({' or '.join(cfg['env'])})")
     base = os.getenv("RAGOBSERVE_OPENAI_BASE_URL", cfg["base"]).rstrip("/")
-    messages: List[Dict[str, str]] = []
+    messages: List[Dict[str, Any]] = []
     if system:
         messages.append({"role": "system", "content": system})
-    messages.append({"role": "user", "content": prompt})
+    content: Any = prompt
+    if images:
+        content = [{"type": "text", "text": prompt}] + [
+            {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}}
+            for mime, b64 in images]
+    messages.append({"role": "user", "content": content})
+    body: Dict[str, Any] = {"model": model, "messages": messages, "max_tokens": max_tokens}
+    if temperature is not None:
+        body["temperature"] = temperature
     try:
         r = httpx.post(
             f"{base}/chat/completions",
             headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-            json={"model": model, "messages": messages, "max_tokens": max_tokens},
+            json=body,
             timeout=_TIMEOUT,
         )
         r.raise_for_status()
@@ -135,17 +145,22 @@ def _call_openai_compatible(cfg, model, system, prompt, max_tokens) -> Dict[str,
     }
 
 
-def _call_anthropic(cfg, model, system, prompt, max_tokens) -> Dict[str, Any]:
+def _call_anthropic(cfg, model, system, prompt, max_tokens, temperature=None, images=None) -> Dict[str, Any]:
     key = _api_key(cfg)
     if not key:
         raise ProviderError("missing API key (ANTHROPIC_API_KEY)")
     base = cfg["base"].rstrip("/")
     body: Dict[str, Any] = {
         "model": model, "max_tokens": max_tokens,
-        "messages": [{"role": "user", "content": prompt}],
+        "messages": [{"role": "user", "content": [
+            {"type": "image", "source": {"type": "base64", "media_type": mime, "data": b64}}
+            for mime, b64 in (images or [])
+        ] + [{"type": "text", "text": prompt}]}],
     }
     if system:
         body["system"] = system
+    if temperature is not None:
+        body["temperature"] = temperature
     try:
         r = httpx.post(
             f"{base}/messages",
@@ -171,17 +186,21 @@ def _call_anthropic(cfg, model, system, prompt, max_tokens) -> Dict[str, Any]:
     }
 
 
-def _call_ollama(cfg, model, system, prompt, max_tokens) -> Dict[str, Any]:
+def _call_ollama(cfg, model, system, prompt, max_tokens, temperature=None, images=None) -> Dict[str, Any]:
     host = os.getenv("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
     messages: List[Dict[str, str]] = []
     if system:
         messages.append({"role": "system", "content": system})
-    messages.append({"role": "user", "content": prompt})
+    user: Dict[str, Any] = {"role": "user", "content": prompt}
+    if images:
+        user["images"] = [b64 for _, b64 in images]
+    messages.append(user)
     try:
         r = httpx.post(
             f"{host}/api/chat",
             json={"model": model, "messages": messages, "stream": False,
-                  "options": {"num_predict": max_tokens}},
+                  "options": {"num_predict": max_tokens,
+                              **({"temperature": temperature} if temperature is not None else {})}},
             timeout=_TIMEOUT,
         )
         r.raise_for_status()
@@ -224,11 +243,22 @@ def available_providers() -> List[Dict[str, Any]]:
     return out
 
 
-def generate(provider: str, model: str, prompt: str, system: Optional[str] = None,
-             max_tokens: int = 1024) -> Dict[str, Any]:
+def default_model(provider: str) -> str:
     cfg = PROVIDERS.get((provider or "").lower())
     if cfg is None:
         raise ProviderError(f"unknown provider: {provider!r}")
-    cfg = {**cfg, "id": provider.lower()}
+    return cfg["default_model"]
+
+
+def generate(provider: str, model: str, prompt: str, system: Optional[str] = None,
+             max_tokens: int = 1024, temperature: Optional[float] = None,
+             api_key: Optional[str] = None,
+             images: Optional[List[Tuple[str, str]]] = None) -> Dict[str, Any]:
+    """``api_key`` overrides the provider's env var for this call.
+    ``images`` is ``[(mime, base64), ...]`` sent alongside the prompt."""
+    cfg = PROVIDERS.get((provider or "").lower())
+    if cfg is None:
+        raise ProviderError(f"unknown provider: {provider!r}")
+    cfg = {**cfg, "id": provider.lower(), "key": api_key}
     model = model or cfg["default_model"]
-    return _DISPATCH[cfg["kind"]](cfg, model, system, prompt, max_tokens)
+    return _DISPATCH[cfg["kind"]](cfg, model, system, prompt, max_tokens, temperature, images)
