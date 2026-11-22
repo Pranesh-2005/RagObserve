@@ -170,6 +170,9 @@ ragobserve.init(project="prod", store=MyStore())
 - **Context Builder Viewer** — exactly what was sent to the model, DevTools-style
 - **Chunk Explorer** — most retrieved / never retrieved (dead) / duplicate chunks
 - **Metrics** — Precision@k, Recall@k, MRR, nDCG over logged ground truth, plus chunk utilization
+- **Failure triage** — each trace labelled with the first stage that broke: `retrieval_miss`, `rerank_drop`, `context_drop`, `unsupported_claims`, `unfaithful`, `off_topic`, `empty_retrieval`, `error` (Metrics page + a badge on every trace)
+- **Compare** — two projects side by side (recall, MRR, nDCG, faithfulness, p50/p95 latency, cost, triage counts) with better/worse deltas; pairs naturally with `ragobserve test` runs
+- **Evaluation panel** — "Score this trace" on any trace, with the LLM judge (any provider) or Ragas
 - **Generations & cost** — Langfuse-style cost tracing: per-model / per-day token & $ breakdowns, charts, and the context that produced each generation. Costs are auto-backfilled from a built-in price book when you don't pass `cost=`.
 
 ## Multimodal RAG
@@ -196,9 +199,25 @@ Log your text and image legs as two `log_retrieval` calls with different `retrie
 names and the Hybrid Search Explorer puts them side by side. Ranking metrics work
 unchanged as long as image ids don't collide with chunk ids.
 
-Vision **cost** is text-only for now — `log_generation` counts `input_tokens`, and the
-price book has no per-image rate, so an image-heavy call underreports. Pass `cost=`
-yourself if you need it exact.
+**Vision cost.** Pass image sizes and the image tokens are priced with each vendor's own sizing rule (Claude, Gemini, OpenAI tiling, including `gpt-4o-mini`'s higher per-tile count):
+
+```python
+ragobserve.log_generation(model="gpt-4o", input_tokens=300, output_tokens=40,
+                          images=[{"width": 1024, "height": 1024}])   # +765 image tokens
+```
+
+Pass `input_tokens` as the *text* count when you do this. Provider usage numbers already include images, so if you're passing those, leave out `images`. `image_tokens=` overrides the estimate.
+
+**Replay keeps images.** Generation replay sends the trace's image context (`path` or `image_b64`; up to 8 images, 5MB each) to OpenAI-compatible providers, Anthropic and Ollama.
+
+**Grounding.** Record which answer sentences the context supports, and the trace gets a Grounding panel. Triage flags traces where less than half the claims are supported:
+
+```python
+ragobserve.log_grounding([
+    {"sentence": "The notice period is 90 days.", "supported": True, "chunk_id": "c12"},
+    {"sentence": "It was signed in 2020.", "supported": False},
+], method="nli")
+```
 
 ## Docker
 
@@ -242,7 +261,7 @@ The dashboard auto-reads the key from the `?key=` URL param on first load and st
 
 ## LLM evaluation (faithfulness & answer relevance)
 
-Rate your RAG system's answers with LLM-as-judge metrics powered by Groq (fast, free tier).
+Rate your RAG system's answers with LLM-as-judge metrics. The judge runs on any of the replay providers (`ragobserve providers`); Groq is the default.
 
 ```python
 from ragobserve.eval import score_faithfulness, score_answer_relevance, evaluate_trace
@@ -259,12 +278,43 @@ result = evaluate_trace(trace_data, api_key="gsk_...")
 # → {"faithfulness": {...}, "answer_relevance": {...}}
 ```
 
-Requires `GROQ_API_KEY` env var (or pass `api_key=` explicitly). Uses `llama3-8b-8192` by default; pass `model=` to change.
+Needs the provider's key env var (`GROQ_API_KEY` for the default), or pass `api_key=`. Pass `provider=` / `model=` to change the judge; the model defaults to the provider's default.
 
 ```bash
 # Batch-eval all traces in a project from the CLI
 ragobserve eval --project my-rag --api-key gsk_...
+ragobserve eval --project my-rag --provider anthropic --model claude-haiku-4-5
 ```
+
+### Ragas
+
+[Ragas](https://github.com/explodinggradients/ragas) works two ways:
+
+```bash
+# 1. Export traces as Ragas samples (no ragas install needed)
+ragobserve export --project my-rag --format ragas -o samples.jsonl
+
+# 2. Score with Ragas and store results in the dashboard
+pip install "ragobserve[ragas]"
+ragobserve eval --project my-rag --backend ragas      # or POST /api/eval/{id}?backend=ragas
+```
+
+```python
+from ragobserve.ragas import to_ragas_dataset, evaluate_traces
+
+ds = to_ragas_dataset(traces)          # ragas.EvaluationDataset, run any Ragas metric on it
+scores = evaluate_traces(traces, llm=my_llm, embeddings=my_emb)
+```
+
+Already ran Ragas elsewhere? Attach the scores back to their traces:
+
+```bash
+ragobserve import-ragas results.csv --project my-rag   # result.to_pandas().to_csv(...), or JSONL
+```
+
+Rows match by `trace_id` (included in `export --format ragas` output), else by `user_input` == the trace's query. Every metric column is stored, so `context_recall` and friends show up on the trace's Evaluation panel.
+
+Each sample has `user_input`, `response`, `retrieved_contexts` (the assembled context, or else the reranked hits, or else the raw retrieval) and `retrieved_context_ids`. If you logged ground truth, it also gets `reference_context_ids`. If a log call got `reference="gold answer"` (for example `log_generation(..., reference=...)`), the sample also gets `reference`. Ragas `faithfulness` / `answer_relevancy` scores are stored under the dashboard's existing `faithfulness` / `answer_relevance` metrics. With no `llm=` passed, Ragas uses its own default, which is OpenAI (`OPENAI_API_KEY`).
 
 ## Model pricing (auto-updating)
 
@@ -363,6 +413,32 @@ rows = cur.fetchall()
 ragobserve.log_pgvector(query, rows)
 ```
 
+## OpenTelemetry (no code changes)
+
+Already instrumented with **OpenInference** (Arize Phoenix), **OpenLLMetry** (Traceloop) or the OTel **GenAI semantic conventions**? Point the exporter at RAGObserve:
+
+```bash
+export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://localhost:5601/v1/traces
+export OTEL_EXPORTER_OTLP_TRACES_HEADERS="Authorization=Bearer <key>"
+pip install "ragobserve[otel]"     # server side, for protobuf (the Python/JS exporter default)
+```
+
+Retriever spans become Retrieval Explorer rows (documents, ids, scores), reranker spans get before/after, LLM spans get model, prompt, response, tokens and a backfilled cost, and chain/agent spans stay as plain spans. The project comes from the `X-Ragobserve-Project` header, else `service.name`. The original OTel attributes are kept under `attributes.otel`. OTLP/JSON works without the extra.
+
+## Golden-set regression (CI)
+
+Run a fixed question set through your instrumented pipeline and fail the build when quality drops:
+
+```bash
+# golden.jsonl: {"question": "...", "relevant_chunk_ids": ["c12"], "reference": "90 days"}
+ragobserve test --golden golden.jsonl --pipeline my_app.rag:answer   --min-recall 0.8 --min-mrr 0.6 --min-faithfulness 0.7
+```
+
+- `--pipeline module:function` is any `fn(question) -> answer`, sync or async, that calls `ragobserve.log_*` inside. If it returns a string and logs no generation, the string is logged as the answer.
+- Each run lands in its own project (`golden-YYYYmmdd-HHMMSS`, or `--project`), so two runs line up on the **Compare** page.
+- `--min-faithfulness` / `--min-answer-relevance` turn on the LLM judge (Groq by default; `--judge-provider`, `--judge-model`).
+- A threshold with no data **fails**, so a broken ground-truth file can't pass silently. Exit code: 0 pass, 1 fail, 2 bad input. `--json` prints a machine-readable report.
+
 ## Export traces
 
 ```bash
@@ -373,6 +449,9 @@ ragobserve export --project my-rag --output traces.ndjson
 ragobserve export --project my-rag \
   --backend-store-uri postgresql://user:pass@host:5432/ragobs \
   --output traces.ndjson
+
+# One Ragas sample per line instead of raw traces
+ragobserve export --project my-rag --format ragas -o samples.jsonl
 ```
 
 ## Health endpoint
